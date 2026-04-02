@@ -958,6 +958,19 @@ ExecSetTupleBound(int64 tuples_needed, PlanState *child_node)
 
 		ExecSetTupleBound(tuples_needed, outerPlanState(child_node));
 	}
+	else if (IsA(child_node, NestLoopState) ||
+			 IsA(child_node, MergeJoinState) || IsA(child_node, HashJoinState))
+	{
+		/*
+		 * A left or full join can propagate the bound to the outer side, but
+		 * only if it has no filtering qual (otherwise it might discard rows).
+		 */
+		JoinState *jstate = (JoinState *) child_node;
+
+		if ((jstate->jointype == JOIN_LEFT || jstate->jointype == JOIN_FULL)
+			&& jstate->ps.qual == NULL)
+			ExecSetTupleBound(tuples_needed, outerPlanState(child_node));
+	}
 
 	/*
 	 * In principle we could descend through any plan node type that is
