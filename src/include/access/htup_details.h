@@ -66,8 +66,6 @@
  *			fixed fields (HeapTupleHeaderData struct)
  *			nulls bitmap (if HEAP_HASNULL is set in t_infomask)
  *			alignment padding (as needed to make user data MAXALIGN'd)
- *			object ID (if HEAP_HASOID_OLD is set in t_infomask, not created
- *          anymore)
  *			user data fields
  *
  * We store five "virtual" fields Xmin, Cmin, Xmax, Cmax, and Xvac in three
@@ -190,7 +188,7 @@ struct HeapTupleHeaderData
 #define HEAP_HASNULL			0x0001	/* has null attribute(s) */
 #define HEAP_HASVARWIDTH		0x0002	/* has variable-width attribute(s) */
 #define HEAP_HASEXTERNAL		0x0004	/* has external stored attribute(s) */
-#define HEAP_HASOID_OLD			0x0008	/* has an object-id field */
+#define HEAP_UNUSED_FLAG		0x0008	/* previously HEAP_HASOID now unused */
 #define HEAP_XMAX_KEYSHR_LOCK	0x0010	/* xmax is a key-shared locker */
 #define HEAP_COMBOCID			0x0020	/* t_cid is a combo CID */
 #define HEAP_XMAX_EXCL_LOCK		0x0040	/* xmax is exclusive locker */
