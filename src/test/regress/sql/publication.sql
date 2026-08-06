@@ -123,6 +123,28 @@ CREATE PUBLICATION testpub_foralltables_excepttable1 FOR ALL TABLES EXCEPT (TABL
 -- Check that the table description shows the publications where it is listed
 -- in the EXCEPT clause
 \d testpub_tbl1
+-- Check object address handling for an EXCEPT entry
+\a\t
+SELECT (pg_identify_object('pg_publication_rel'::regclass, pr.oid, 0)).*
+FROM pg_publication_rel pr
+JOIN pg_publication p ON p.oid = pr.prpubid
+JOIN pg_class c ON c.oid = pr.prrelid
+WHERE p.pubname = 'testpub_foralltables_excepttable1'
+  AND c.relname = 'testpub_tbl1';
+SELECT (pg_identify_object(addr1.classid, addr1.objid, addr1.objsubid)).*,
+       ROW(pg_identify_object(addr1.classid, addr1.objid, addr1.objsubid)) =
+         ROW(pg_identify_object(addr2.classid, addr2.objid, addr2.objsubid)) AS roundtrip
+FROM pg_get_object_address('publication exclusion',
+                           '{public, testpub_tbl1}',
+                           '{testpub_foralltables_excepttable1}') AS addr1,
+     pg_identify_object_as_address(classid, objid, objsubid) AS ioa (typ, nms, args),
+     pg_get_object_address(typ, nms, ioa.args) AS addr2;
+SELECT pg_get_object_address('publication exclusion',
+                             '{public, testpub_tbl1}', '{testpub_fortable}');
+SELECT pg_get_object_address('publication relation',
+                             '{public, testpub_tbl1}',
+                             '{testpub_foralltables_excepttable1}');
+\a\t
 -- fail - first table in the EXCEPT list should use TABLE keyword
 CREATE PUBLICATION testpub_foralltables_excepttable2 FOR ALL TABLES EXCEPT (testpub_tbl1, testpub_tbl2);
 

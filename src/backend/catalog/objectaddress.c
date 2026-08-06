@@ -721,6 +721,8 @@ static const ObjectPropertyType ObjectProperty[] =
  * must be careful to test for invalid values being returned.
  *
  * To ease maintenance, this follows the order of getObjectTypeDescription.
+ * Some object classes can report different type strings for the same catalog
+ * depending on tuple contents; keep such aliases next to the base type.
  */
 static const struct object_type_map
 {
@@ -917,6 +919,9 @@ static const struct object_type_map
 		"publication relation", OBJECT_PUBLICATION_REL
 	},
 	{
+		"publication exclusion", OBJECT_PUBLICATION_REL
+	},
+	{
 		"subscription", OBJECT_SUBSCRIPTION
 	},
 	{
@@ -958,7 +963,8 @@ static ObjectAddress get_object_address_usermapping(List *object,
 													bool missing_ok);
 static ObjectAddress get_object_address_publication_rel(List *object,
 														Relation *relp,
-														bool missing_ok);
+														bool missing_ok,
+														bool pubrel_is_exclusion);
 static ObjectAddress get_object_address_publication_schema(List *object,
 														   bool missing_ok);
 static ObjectAddress get_object_address_defacl(List *object,
@@ -979,6 +985,7 @@ static void getOpFamilyIdentity(StringInfo buffer, Oid opfid, List **object,
 								bool missing_ok);
 static void getRelationIdentity(StringInfo buffer, Oid relid, List **object,
 								bool missing_ok);
+static bool isPublicationRelationExcept(Oid pubreloid, bool missing_ok);
 
 /*
  * Translate an object name and arguments (as passed by the parser) to an
@@ -1209,7 +1216,8 @@ get_object_address(ObjectType objtype, Node *object,
 			case OBJECT_PUBLICATION_REL:
 				address = get_object_address_publication_rel(castNode(List, object),
 															 &relation,
-															 missing_ok);
+															 missing_ok,
+															 false);
 				break;
 			case OBJECT_DEFACL:
 				address = get_object_address_defacl(castNode(List, object),
@@ -1961,13 +1969,14 @@ get_object_address_usermapping(List *object, bool missing_ok)
 }
 
 /*
- * Find the ObjectAddress for a publication relation.  The first element of
- * the object parameter is the relation name, the second is the
+ * Find the ObjectAddress for a publication relation or exclusion.  The first
+ * element of the object parameter is the relation name, the second is the
  * publication name.
  */
 static ObjectAddress
 get_object_address_publication_rel(List *object,
-								   Relation *relp, bool missing_ok)
+								   Relation *relp, bool missing_ok,
+								   bool pubrel_is_exclusion)
 {
 	ObjectAddress address;
 	Relation	relation;
@@ -1999,19 +2008,61 @@ get_object_address_publication_rel(List *object,
 		GetSysCacheOid2(PUBLICATIONRELMAP, Anum_pg_publication_rel_oid,
 						ObjectIdGetDatum(RelationGetRelid(relation)),
 						ObjectIdGetDatum(pub->oid));
-	if (!OidIsValid(address.objectId))
+	if (OidIsValid(address.objectId) &&
+		pubrel_is_exclusion == isPublicationRelationExcept(address.objectId,
+														   missing_ok))
 	{
-		if (!missing_ok)
+		*relp = relation;
+		return address;
+	}
+
+	if (!missing_ok)
+	{
+		if (pubrel_is_exclusion)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("publication exclusion \"%s\" from publication \"%s\" does not exist",
+							RelationGetRelationName(relation), pubname)));
+		else
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_OBJECT),
 					 errmsg("publication relation \"%s\" in publication \"%s\" does not exist",
 							RelationGetRelationName(relation), pubname)));
-		relation_close(relation, AccessShareLock);
-		return address;
 	}
 
-	*relp = relation;
+	/* Treat a missing mapping or type/prexcept mismatch as not found. */
+	address.objectId = InvalidOid;
+	relation_close(relation, AccessShareLock);
 	return address;
+}
+
+/*
+ * Return whether an existing pg_publication_rel entry represents a publication
+ * EXCEPT entry.
+ */
+static bool
+isPublicationRelationExcept(Oid pubreloid, bool missing_ok)
+{
+	HeapTuple	tup;
+	Form_pg_publication_rel prform;
+	bool		result;
+
+	tup = SearchSysCache1(PUBLICATIONREL, ObjectIdGetDatum(pubreloid));
+	if (!HeapTupleIsValid(tup))
+	{
+		if (!missing_ok)
+			elog(ERROR, "cache lookup failed for publication table %u",
+				 pubreloid);
+
+		return false;
+	}
+
+	prform = (Form_pg_publication_rel) GETSTRUCT(tup);
+	result = prform->prexcept;
+
+	ReleaseSysCache(tup);
+
+	return result;
 }
 
 /*
@@ -2224,6 +2275,7 @@ pg_get_object_address(PG_FUNCTION_ARGS)
 	bool		nulls[3];
 	HeapTuple	htup;
 	Relation	relation;
+	bool		pubrel_is_exclusion;
 
 	/* Decode object type, raise error if unknown */
 	itype = read_objtype_from_string(ttype);
@@ -2232,6 +2284,7 @@ pg_get_object_address(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("unsupported object type \"%s\"", ttype)));
 	type = (ObjectType) itype;
+	pubrel_is_exclusion = (strcmp(ttype, "publication exclusion") == 0);
 
 	/*
 	 * Convert the text array to the representation appropriate for the given
@@ -2464,8 +2517,23 @@ pg_get_object_address(PG_FUNCTION_ARGS)
 	if (objnode == NULL)
 		elog(ERROR, "unrecognized object type: %d", type);
 
-	addr = get_object_address(type, objnode,
-							  &relation, AccessShareLock, false);
+	if (pubrel_is_exclusion)
+	{
+		addr = get_object_address_publication_rel(castNode(List, objnode),
+												  &relation, false, true);
+		if (addr.classId != RelationRelationId)
+		{
+			if (IsSharedRelation(addr.classId))
+				LockSharedObject(addr.classId, addr.objectId, 0,
+								 AccessShareLock);
+			else
+				LockDatabaseObject(addr.classId, addr.objectId, 0,
+								   AccessShareLock);
+		}
+	}
+	else
+		addr = get_object_address(type, objnode,
+								  &relation, AccessShareLock, false);
 
 	/* We don't need the relcache entry, thank you very much */
 	if (relation)
@@ -4270,9 +4338,18 @@ getObjectDescription(const ObjectAddress *object, bool missing_ok)
 				initStringInfo(&rel);
 				getRelationDescription(&rel, prform->prrelid, false);
 
-				/* translator: first %s is, e.g., "table %s" */
-				appendStringInfo(&buffer, _("publication of %s in publication %s"),
-								 rel.data, pubname);
+				if (prform->prexcept)
+				{
+					/* translator: first %s is, e.g., "table %s" */
+					appendStringInfo(&buffer, _("exclusion of %s from publication %s"),
+									 rel.data, pubname);
+				}
+				else
+				{
+					/* translator: first %s is, e.g., "table %s" */
+					appendStringInfo(&buffer, _("publication of %s in publication %s"),
+									 rel.data, pubname);
+				}
 				pfree(rel.data);
 				ReleaseSysCache(tup);
 				break;
@@ -4928,7 +5005,10 @@ getObjectTypeDescription(const ObjectAddress *object, bool missing_ok)
 			break;
 
 		case PublicationRelRelationId:
-			appendStringInfoString(&buffer, "publication relation");
+			if (isPublicationRelationExcept(object->objectId, missing_ok))
+				appendStringInfoString(&buffer, "publication exclusion");
+			else
+				appendStringInfoString(&buffer, "publication relation");
 			break;
 
 		case SubscriptionRelationId:
@@ -6368,7 +6448,11 @@ getObjectIdentityParts(const ObjectAddress *object,
 				pubname = get_publication_name(prform->prpubid, false);
 
 				getRelationIdentity(&buffer, prform->prrelid, objname, false);
-				appendStringInfo(&buffer, " in publication %s", pubname);
+				if (prform->prexcept)
+					appendStringInfo(&buffer, " excluded from publication %s",
+									 pubname);
+				else
+					appendStringInfo(&buffer, " in publication %s", pubname);
 
 				if (objargs)
 					*objargs = list_make1(pubname);
