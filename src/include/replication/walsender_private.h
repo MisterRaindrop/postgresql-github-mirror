@@ -16,6 +16,7 @@
 #include "lib/ilist.h"
 #include "nodes/nodes.h"
 #include "nodes/replnodes.h"
+#include "port/atomics.h"
 #include "replication/syncrep.h"
 #include "storage/condition_variable.h"
 #include "storage/shmem.h"
@@ -91,9 +92,15 @@ typedef struct
 
 	/*
 	 * Current location of the head of the queue. All waiters should have a
-	 * waitLSN that follows this value. Protected by SyncRepLock.
+	 * waitLSN that follows this value. It is atomic, but protected by
+	 * SyncRepLock for concurrent writting since it's change triggers wake of
+	 * waiters.
+	 *
+	 * A committer whose LSN this mirror already covers was acknowledged by a
+	 * valid quorum and has nothing to wait for, so it reads this before
+	 * taking SyncRepLock at all.
 	 */
-	XLogRecPtr	lsn[NUM_SYNC_REP_WAIT_MODE];
+	pg_atomic_uint64 lsn[NUM_SYNC_REP_WAIT_MODE];
 
 	/*
 	 * Status of data related to the synchronous standbys.  Waiting backends
