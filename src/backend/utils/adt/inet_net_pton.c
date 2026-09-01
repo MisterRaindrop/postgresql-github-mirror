@@ -32,11 +32,31 @@ static const char rcsid[] = "Id: inet_net_pton.c,v 1.4.2.3 2004/03/17 00:40:11 m
 #include "utils/builtins.h"		/* needed on some platforms */
 #include "utils/inet.h"
 
+#define INET4_MAXBITS		32	/* RFC 4632 */
+#define INET6_MAXBITS		128 /* RFC 4291 */
+#define INET4_OCTET_MAX		255
+#define INET4_OCTET_BITS	8
+#define NS_INADDRSZ			4
+#define NS_IN6ADDRSZ		16
+#define NS_INT16SZ			2
+
+#define INET4_CLASSB_MIN	128
+#define INET4_CLASSC_MIN	192
+#define INET4_CLASSD_MIN	224
+#define INET4_CLASSE_MIN	240
+
+#define INET4_CLASSA_BITS	8
+#define INET4_CLASSB_BITS	16
+#define INET4_CLASSC_BITS	24
+#define INET4_CLASSD_BITS	8
+#define INET4_CLASSD_MC_BITS 4
+
 
 static int	inet_net_pton_ipv4(const char *src, u_char *dst);
 static int	inet_cidr_pton_ipv4(const char *src, u_char *dst, size_t size);
 static int	inet_net_pton_ipv6(const char *src, u_char *dst);
 static int	inet_cidr_pton_ipv6(const char *src, u_char *dst, size_t size);
+static int	getbits(const char *src, int *bitsp, int maxbits);
 
 
 /*
@@ -149,7 +169,7 @@ inet_cidr_pton_ipv4(const char *src, u_char *dst, size_t size)
 				assert(n >= 0 && n <= 9);
 				tmp *= 10;
 				tmp += n;
-				if (tmp > 255)
+				if (tmp > INET4_OCTET_MAX)
 					goto enoent;
 			} while ((ch = *src++) != '\0' &&
 					 isdigit((unsigned char) ch));
@@ -171,20 +191,9 @@ inet_cidr_pton_ipv4(const char *src, u_char *dst, size_t size)
 	bits = -1;
 	if (ch == '/' && isdigit((unsigned char) src[0]) && dst > odst)
 	{
-		/* CIDR width specifier.  Nothing can follow it. */
-		ch = *src++;			/* Skip over the /. */
-		bits = 0;
-		do
-		{
-			n = strchr(digits, ch) - digits;
-			assert(n >= 0 && n <= 9);
-			bits *= 10;
-			bits += n;
-		} while ((ch = *src++) != '\0' && isdigit((unsigned char) ch));
-		if (ch != '\0')
-			goto enoent;
-		if (bits > 32)
+		if (getbits(src, &bits, INET4_MAXBITS) <= 0)
 			goto emsgsize;
+		ch = '\0';
 	}
 
 	/* Fiery death and destruction unless we prefetched EOS. */
@@ -197,30 +206,29 @@ inet_cidr_pton_ipv4(const char *src, u_char *dst, size_t size)
 	/* If no CIDR spec was given, infer width from net class. */
 	if (bits == -1)
 	{
-		if (*odst >= 240)		/* Class E */
-			bits = 32;
-		else if (*odst >= 224)	/* Class D */
-			bits = 8;
-		else if (*odst >= 192)	/* Class C */
-			bits = 24;
-		else if (*odst >= 128)	/* Class B */
-			bits = 16;
+		if (*odst >= INET4_CLASSE_MIN)
+			bits = INET4_MAXBITS;
+		else if (*odst >= INET4_CLASSD_MIN)
+			bits = INET4_CLASSD_BITS;
+		else if (*odst >= INET4_CLASSC_MIN)
+			bits = INET4_CLASSC_BITS;
+		else if (*odst >= INET4_CLASSB_MIN)
+			bits = INET4_CLASSB_BITS;
 		else
-			/* Class A */
-			bits = 8;
+			bits = INET4_CLASSA_BITS;
 		/* If imputed mask is narrower than specified octets, widen. */
-		if (bits < ((dst - odst) * 8))
-			bits = (dst - odst) * 8;
+		if (bits < ((dst - odst) * INET4_OCTET_BITS))
+			bits = (dst - odst) * INET4_OCTET_BITS;
 
 		/*
 		 * If there are no additional bits specified for a class D address
 		 * adjust bits to 4.
 		 */
-		if (bits == 8 && *odst == 224)
-			bits = 4;
+		if (bits == INET4_CLASSD_BITS && *odst == INET4_CLASSD_MIN)
+			bits = INET4_CLASSD_MC_BITS;
 	}
 	/* Extend network to cover the actual mask. */
-	while (bits > ((dst - odst) * 8))
+	while (bits > ((dst - odst) * INET4_OCTET_BITS))
 	{
 		if (size-- <= 0U)
 			goto emsgsize;
@@ -263,7 +271,7 @@ inet_net_pton_ipv4(const char *src, u_char *dst)
 				ch,
 				tmp,
 				bits;
-	size_t		size = 4;
+	size_t		size = NS_INADDRSZ;
 
 	/* Get the mantissa. */
 	while (ch = *src++, isdigit((unsigned char) ch))
@@ -275,7 +283,7 @@ inet_net_pton_ipv4(const char *src, u_char *dst)
 			assert(n >= 0 && n <= 9);
 			tmp *= 10;
 			tmp += n;
-			if (tmp > 255)
+			if (tmp > INET4_OCTET_MAX)
 				goto enoent;
 		} while ((ch = *src++) != '\0' && isdigit((unsigned char) ch));
 		if (size-- == 0)
@@ -291,20 +299,9 @@ inet_net_pton_ipv4(const char *src, u_char *dst)
 	bits = -1;
 	if (ch == '/' && isdigit((unsigned char) src[0]) && dst > odst)
 	{
-		/* CIDR width specifier.  Nothing can follow it. */
-		ch = *src++;			/* Skip over the /. */
-		bits = 0;
-		do
-		{
-			n = strchr(digits, ch) - digits;
-			assert(n >= 0 && n <= 9);
-			bits *= 10;
-			bits += n;
-		} while ((ch = *src++) != '\0' && isdigit((unsigned char) ch));
-		if (ch != '\0')
-			goto enoent;
-		if (bits > 32)
+		if (getbits(src, &bits, INET4_MAXBITS) <= 0)
 			goto emsgsize;
+		ch = '\0';
 	}
 
 	/* Fiery death and destruction unless we prefetched EOS. */
@@ -314,8 +311,8 @@ inet_net_pton_ipv4(const char *src, u_char *dst)
 	/* Prefix length can default to /32 only if all four octets spec'd. */
 	if (bits == -1)
 	{
-		if (dst - odst == 4)
-			bits = 32;
+		if (dst - odst == NS_INADDRSZ)
+			bits = INET4_MAXBITS;
 		else
 			goto enoent;
 	}
@@ -325,7 +322,7 @@ inet_net_pton_ipv4(const char *src, u_char *dst)
 		goto enoent;
 
 	/* If prefix length overspecifies mantissa, life is bad. */
-	if ((bits / 8) > (dst - odst))
+	if ((bits / INET4_OCTET_BITS) > (dst - odst))
 		goto enoent;
 
 	/* Extend address to four octets. */
@@ -344,7 +341,7 @@ emsgsize:
 }
 
 static int
-getbits(const char *src, int *bitsp)
+getbits(const char *src, int *bitsp, int maxbits)
 {
 	static const char digits[] = "0123456789";
 	int			n;
@@ -364,7 +361,7 @@ getbits(const char *src, int *bitsp)
 				return 0;
 			val *= 10;
 			val += (pch - digits);
-			if (val > 128)		/* range */
+			if (val > maxbits)	/* RFC 4632 / RFC 4291 prefix range */
 				return 0;
 			continue;
 		}
@@ -398,17 +395,17 @@ getv4(const char *src, u_char *dst, int *bitsp)
 				return 0;
 			val *= 10;
 			val += (pch - digits);
-			if (val > 255)		/* range */
+			if (val > INET4_OCTET_MAX)	/* range */
 				return 0;
 			continue;
 		}
 		if (ch == '.' || ch == '/')
 		{
-			if (dst - odst > 3) /* too many octets? */
+			if (dst - odst > NS_INADDRSZ - 1) /* too many octets */
 				return 0;
 			*dst++ = val;
 			if (ch == '/')
-				return getbits(src, bitsp);
+				return getbits(src, bitsp, INET6_MAXBITS);
 			val = 0;
 			n = 0;
 			continue;
@@ -417,7 +414,7 @@ getv4(const char *src, u_char *dst, int *bitsp)
 	}
 	if (n == 0)
 		return 0;
-	if (dst - odst > 3)			/* too many octets? */
+	if (dst - odst > NS_INADDRSZ - 1) /* too many octets */
 		return 0;
 	*dst++ = val;
 	return 1;
@@ -426,12 +423,8 @@ getv4(const char *src, u_char *dst, int *bitsp)
 static int
 inet_net_pton_ipv6(const char *src, u_char *dst)
 {
-	return inet_cidr_pton_ipv6(src, dst, 16);
+	return inet_cidr_pton_ipv6(src, dst, NS_IN6ADDRSZ);
 }
-
-#define NS_IN6ADDRSZ 16
-#define NS_INT16SZ 2
-#define NS_INADDRSZ 4
 
 static int
 inet_cidr_pton_ipv6(const char *src, u_char *dst, size_t size)
@@ -508,7 +501,7 @@ inet_cidr_pton_ipv6(const char *src, u_char *dst, size_t size)
 			saw_xdigit = 0;
 			break;				/* '\0' was seen by inet_pton4(). */
 		}
-		if (ch == '/' && getbits(src, &bits) > 0)
+		if (ch == '/' && getbits(src, &bits, INET6_MAXBITS) > 0)
 			break;
 		goto enoent;
 	}
@@ -520,9 +513,9 @@ inet_cidr_pton_ipv6(const char *src, u_char *dst, size_t size)
 		*tp++ = (u_char) val & 0xff;
 	}
 	if (bits == -1)
-		bits = 128;
+		bits = INET6_MAXBITS;
 
-	endp = tmp + 16;
+	endp = tmp + NS_IN6ADDRSZ;
 
 	if (colonp != NULL)
 	{

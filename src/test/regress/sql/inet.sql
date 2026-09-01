@@ -29,6 +29,11 @@ INSERT INTO INET_TBL (c, i) VALUES ('1234::1234::1234', '::1.2.3.4');
 -- check that CIDR rejects invalid input when converting from text:
 INSERT INTO INET_TBL (c, i) VALUES (cidr('192.168.1.2/30'), '192.168.1.226');
 INSERT INTO INET_TBL (c, i) VALUES (cidr('ffff:ffff:ffff:ffff::/24'), '::192.168.1.226');
+-- reject invalid IPv4 CIDR prefix lengths (RFC 4632: decimal 0-32)
+SELECT ('10.0.0.0/' || repeat('9', 32))::cidr;
+SELECT ('10.0.0.0/' || repeat('9', 32))::inet;
+SELECT '10.0.0.0/033'::cidr;
+SELECT '10.0.0.0/033'::inet;
 SELECT c AS cidr, i AS inet FROM INET_TBL;
 
 -- now test some support functions
