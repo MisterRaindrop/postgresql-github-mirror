@@ -3910,6 +3910,20 @@ acl      | {postgres=arwdDxtm/postgres,foo=r/postgres}
         <literal>OWNER</literal> clause is omitted.  When
         <parameter>tablespace</parameter> is false, the
         <literal>TABLESPACE</literal> clause is omitted.
+       </para>
+       <para>
+        Requires <literal>SELECT</literal> privilege on both the
+        <link linkend="catalog-pg-database"><structname>pg_database</structname></link>
+        and <link linkend="catalog-pg-db-role-setting"><structname>pg_db_role_setting</structname></link>
+        catalogs, both of which are readable by all roles by default.  If
+        <parameter>owner</parameter> is true (the default), also requires
+        <literal>SELECT</literal> privilege on
+        <link linkend="view-pg-roles"><structname>pg_roles</structname></link>,
+        to name the database's owner.  If <parameter>tablespace</parameter>
+        is true (the default) and the database is not in the default
+        tablespace, also requires <literal>SELECT</literal> privilege on
+        <link linkend="catalog-pg-tablespace"><structname>pg_tablespace</structname></link>,
+        to name the tablespace.
        </para></entry>
       </row>
       <row>
@@ -3922,19 +3936,56 @@ acl      | {postgres=arwdDxtm/postgres,foo=r/postgres}
         <optional>, <parameter>pretty</parameter> <type>boolean</type>
         <literal>DEFAULT</literal> false</optional>
         <optional>, <parameter>memberships</parameter> <type>boolean</type>
+        <literal>DEFAULT</literal> true</optional>
+        <optional>, <parameter>password</parameter> <type>boolean</type>
+        <literal>DEFAULT</literal> true</optional>
+        <optional>, <parameter>in_database_settings</parameter> <type>boolean</type>
         <literal>DEFAULT</literal> true</optional> )
         <returnvalue>setof text</returnvalue>
        </para>
        <para>
         Reconstructs the <link linkend="sql-createrole"><command>CREATE ROLE
-        </command></link> statement and any <link linkend="sql-alterrole">
-        <command>ALTER ROLE ... SET</command></link> statements for the given
-        role.  Each statement is returned as a separate row.
-        Password information is never included in the output.
+        </command></link> statement for the given role, an <link
+        linkend="sql-alterrole"><command>ALTER ROLE</command></link> statement
+        carrying its attributes, and any role-wide <command>ALTER ROLE ...
+        SET</command> statements.  Each statement is returned as a separate
+        row. If the role has a password, it is included in encrypted form,
+        exactly as stored in
+        <link linkend="catalog-pg-authid"><structname>pg_authid</structname></link>.
         When <parameter>pretty</parameter> is true, the output is
         pretty-printed.  When <parameter>memberships</parameter> is false,
         <link linkend="sql-grant"><command>GRANT</command></link> statements
-        for role memberships are omitted.
+        for role memberships are omitted.  When
+        <parameter>password</parameter> is false, the
+        <literal>PASSWORD</literal> clause is omitted and the function can be
+        used by any role.
+       </para>
+       <para>
+        Role-wide <command>ALTER ROLE ... SET</command> statements are
+        always emitted.  <link linkend="sql-alterrole"><command>ALTER
+        ROLE ... IN DATABASE ... SET</command></link> statements, which
+        depend on the named database already existing, are also emitted
+        unless <parameter>in_database_settings</parameter> is false --
+        useful when assembling this role's DDL before any database has
+        been created.
+       </para>
+       <para>
+        Requires <literal>SELECT</literal> privilege on the
+        <link linkend="view-pg-roles"><structname>pg_roles</structname></link>,
+        <link linkend="catalog-pg-auth-members"><structname>pg_auth_members</structname></link>,
+        and <link linkend="catalog-pg-db-role-setting"><structname>pg_db_role_setting</structname></link>
+        catalogs, all of which are readable by all roles by default. If
+        <parameter>password</parameter> is true (the default), also
+        requires <literal>SELECT</literal> privilege on
+        <link linkend="catalog-pg-authid"><structname>pg_authid</structname></link>,
+        which is not readable by ordinary roles by default -- pass
+        <parameter>password</parameter> as false to call this function
+        without that privilege.  If <parameter>in_database_settings</parameter>
+        is true (the default) and the role has any <command>ALTER ROLE ...
+        IN DATABASE ... SET</command> settings, also requires
+        <literal>SELECT</literal> privilege on
+        <link linkend="catalog-pg-database"><structname>pg_database</structname></link>,
+        to name the database each such setting applies to.
        </para></entry>
       </row>
       <row>
@@ -3968,6 +4019,15 @@ acl      | {postgres=arwdDxtm/postgres,foo=r/postgres}
         returned as a separate row.  When <parameter>pretty</parameter> is
         true, the output is pretty-printed.  When <parameter>owner</parameter>
         is false, the <literal>OWNER</literal> clause is omitted.
+       </para>
+       <para>
+        Requires <literal>SELECT</literal> privilege on the
+        <link linkend="catalog-pg-tablespace"><structname>pg_tablespace</structname></link>
+        catalog, which is readable by all roles by default.  If
+        <parameter>owner</parameter> is true (the default), also requires
+        <literal>SELECT</literal> privilege on
+        <link linkend="view-pg-roles"><structname>pg_roles</structname></link>,
+        to name the tablespace's owner.
        </para></entry>
       </row>
      </tbody>

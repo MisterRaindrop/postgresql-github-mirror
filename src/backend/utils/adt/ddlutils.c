@@ -27,6 +27,7 @@
 #include "catalog/pg_collation.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_db_role_setting.h"
+#include "catalog/pg_namespace_d.h"
 #include "catalog/pg_tablespace.h"
 #include "commands/tablespace.h"
 #include "common/relpath.h"
@@ -179,6 +180,7 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships,
 	ScanKeyData scankey;
 	SysScanDesc scan;
 	List	   *statements = NIL;
+	Oid			pgroles_relid;
 
 	tuple = SearchSysCache1(AUTHOID, ObjectIdGetDatum(roleid));
 	if (!HeapTupleIsValid(tuple))
@@ -190,8 +192,28 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships,
 	rolname = pstrdup(NameStr(roleform->rolname));
 
 	/*
-	 * rolpassword needs SELECT on pg_authid; nothing else here is
-	 * sensitive, so only check it when the PASSWORD clause is wanted.
+	 * Everything below except the password is public by default -- pg_authid
+	 * is revoked from PUBLIC at initdb, but pg_roles, pg_auth_members, and
+	 * pg_db_role_setting keep their default grants -- so the only thing worth
+	 * checking is whether a site has hardened one of these catalogs. Check
+	 * all three: pg_roles alone misses pg_auth_members (memberships) and
+	 * pg_db_role_setting (settings), neither of which it exposes.
+	 */
+	pgroles_relid = get_relname_relid("pg_roles", PG_CATALOG_NAMESPACE);
+	if (!OidIsValid(pgroles_relid) ||
+		pg_class_aclcheck(pgroles_relid, GetUserId(), ACL_SELECT) != ACLCHECK_OK ||
+		pg_class_aclcheck(AuthMemRelationId, GetUserId(), ACL_SELECT) != ACLCHECK_OK ||
+		pg_class_aclcheck(DbRoleSettingRelationId, GetUserId(), ACL_SELECT) != ACLCHECK_OK)
+	{
+		ReleaseSysCache(tuple);
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied for role %s", rolname)));
+	}
+
+	/*
+	 * rolpassword needs SELECT on pg_authid; nothing else here is sensitive,
+	 * so only check it when the PASSWORD clause is wanted.
 	 */
 	if (password &&
 		pg_class_aclcheck(AuthIdRelationId, GetUserId(),
@@ -204,8 +226,8 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships,
 	}
 
 	/*
-	 * Lock and re-verify existence, closing the window for a concurrent
-	 * DROP ROLE before the scans below.
+	 * Lock and re-verify existence, closing the window for a concurrent DROP
+	 * ROLE before the scans below.
 	 */
 	shdepLockAndCheckObject(AuthIdRelationId, roleid);
 
@@ -326,15 +348,21 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships,
 
 		/*
 		 * If setdatabase is valid, this is a role-in-database setting;
-		 * otherwise it's a role-wide setting.  In-database settings depend on
-		 * that database already existing, so they're optional; role-wide ones
-		 * are not.  Look up the database name once for all settings in this
-		 * row.
+		 * otherwise a role-wide one.  In-database settings are optional since
+		 * they depend on that database existing; role-wide ones aren't.
+		 * get_database_name() bypasses ACL checks, so verify pg_database
+		 * access before resolving the name it would disclose.
 		 */
 		if (OidIsValid(datid))
 		{
 			if (!in_database_settings)
 				continue;
+
+			if (pg_class_aclcheck(DatabaseRelationId, GetUserId(),
+								  ACL_SELECT) != ACLCHECK_OK)
+				ereport(ERROR,
+						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+						 errmsg("permission denied for role %s", rolname)));
 
 			datname = get_database_name(datid);
 			/* Database has been dropped; skip all settings in this row. */
@@ -407,9 +435,9 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships,
 	 * member = roleid, meaning this role has been granted membership in other
 	 * roles.
 	 *
-	 * A grantor needs ADMIN OPTION on the granted role already, and the
-	 * only grant of ours that can supply that is a self-grant, so
-	 * self-granted rows must sort last.
+	 * A grantor needs ADMIN OPTION on the granted role already, and the only
+	 * grant of ours that can supply that is a self-grant, so self-granted
+	 * rows must sort last.
 	 */
 	if (memberships)
 	{
@@ -575,8 +603,8 @@ pg_get_tablespace_ddl_internal(Oid tsid, bool pretty, bool no_owner)
 	spcname = pstrdup(NameStr(tspForm->spcname));
 
 	/*
-	 * Everything this emits is public by default, so what matters is
-	 * catalog SELECT on pg_tablespace, not any object-specific privilege.
+	 * Everything this emits is public by default, so what matters is catalog
+	 * SELECT on pg_tablespace, not any object-specific privilege.
 	 */
 	if (pg_class_aclcheck(TableSpaceRelationId, GetUserId(),
 						  ACL_SELECT) != ACLCHECK_OK)
@@ -603,9 +631,21 @@ pg_get_tablespace_ddl_internal(Oid tsid, bool pretty, bool no_owner)
 	/* Start building the CREATE TABLESPACE statement */
 	appendStringInfo(&buf, "CREATE TABLESPACE %s", quote_identifier(spcname));
 
-	/* Add OWNER clause */
+	/*
+	 * GetUserNameFromId() bypasses ACL checks, so verify pg_roles access
+	 * before resolving the owner's name.
+	 */
 	if (!no_owner)
 	{
+		Oid			pgroles_relid = get_relname_relid("pg_roles", PG_CATALOG_NAMESPACE);
+
+		if (!OidIsValid(pgroles_relid) ||
+			pg_class_aclcheck(pgroles_relid, GetUserId(), ACL_SELECT) != ACLCHECK_OK)
+		{
+			ReleaseSysCache(tuple);
+			aclcheck_error(ACLCHECK_NO_PRIV, OBJECT_TABLESPACE, spcname);
+		}
+
 		spcowner = GetUserNameFromId(tspForm->spcowner, false);
 		append_ddl_option(&buf, pretty, 4, "OWNER %s",
 						  quote_identifier(spcowner));
@@ -647,8 +687,8 @@ pg_get_tablespace_ddl_internal(Oid tsid, bool pretty, bool no_owner)
 						 quote_identifier(spcname));
 
 		/*
-		 * Elements are already "name=value", and every option is numeric,
-		 * so emit verbatim, matching pg_dumpall.
+		 * Elements are already "name=value", and every option is numeric, so
+		 * emit verbatim, matching pg_dumpall.
 		 */
 		deconstruct_array_builtin(DatumGetArrayTypeP(datum), TEXTOID,
 								  &options, NULL, &noptions);
@@ -756,7 +796,6 @@ pg_get_database_ddl_internal(Oid dbid, bool pretty,
 	ScanKeyData scankey[2];
 	SysScanDesc scan;
 	List	   *statements = NIL;
-	AclResult	aclresult;
 
 	tuple = SearchSysCache1(DATABASEOID, ObjectIdGetDatum(dbid));
 	if (!HeapTupleIsValid(tuple))
@@ -765,21 +804,25 @@ pg_get_database_ddl_internal(Oid dbid, bool pretty,
 				 errmsg("database with OID %u does not exist", dbid)));
 
 	/*
-	 * User must have connect privilege for target database.  Check this
-	 * before taking any lock below: a caller who can't connect to the
-	 * database has no business holding a lock on it either.
+	 * Everything this emits is public by default, so check catalog SELECT on
+	 * pg_database and pg_db_role_setting (the SET rows come from the latter).
 	 */
-	aclresult = object_aclcheck(DatabaseRelationId, dbid, GetUserId(), ACL_CONNECT);
-	if (aclresult != ACLCHECK_OK)
-		aclcheck_error(aclresult, OBJECT_DATABASE,
+	if (pg_class_aclcheck(DatabaseRelationId, GetUserId(),
+						  ACL_SELECT) != ACLCHECK_OK ||
+		pg_class_aclcheck(DbRoleSettingRelationId, GetUserId(),
+						  ACL_SELECT) != ACLCHECK_OK)
+	{
+		ReleaseSysCache(tuple);
+		aclcheck_error(ACLCHECK_NO_PRIV, OBJECT_DATABASE,
 					   get_database_name(dbid));
+	}
 
 	dbform = (Form_pg_database) GETSTRUCT(tuple);
 	dbname = pstrdup(NameStr(dbform->datname));
 
 	/*
-	 * Lock and re-verify existence, closing the window for a concurrent
-	 * DROP DATABASE before the scan below.
+	 * Lock and re-verify existence, closing the window for a concurrent DROP
+	 * DATABASE before the scan below.
 	 */
 	shdepLockAndCheckObject(DatabaseRelationId, dbid);
 
@@ -880,12 +923,22 @@ pg_get_database_ddl_internal(Oid dbid, bool pretty,
 	/*
 	 * TABLESPACE.  Skip the default tablespace.  Compare by OID: tablespace
 	 * names are case-sensitive, so a user-defined "PG_DEFAULT" is a
-	 * different, valid tablespace.
+	 * different, valid tablespace.  get_tablespace_name() bypasses ACL
+	 * checks, so verify pg_tablespace access first.
 	 */
 	if (!no_tablespace && OidIsValid(dbform->dattablespace) &&
 		dbform->dattablespace != DEFAULTTABLESPACE_OID)
 	{
-		char	   *spcname = get_tablespace_name(dbform->dattablespace);
+		char	   *spcname;
+
+		if (pg_class_aclcheck(TableSpaceRelationId, GetUserId(),
+							  ACL_SELECT) != ACLCHECK_OK)
+		{
+			ReleaseSysCache(tuple);
+			aclcheck_error(ACLCHECK_NO_PRIV, OBJECT_DATABASE, dbname);
+		}
+
+		spcname = get_tablespace_name(dbform->dattablespace);
 
 		if (spcname == NULL)
 			ereport(ERROR,
@@ -901,10 +954,23 @@ pg_get_database_ddl_internal(Oid dbid, bool pretty,
 	appendStringInfoChar(&buf, ';');
 	push_statement(&statements, &buf);
 
-	/* OWNER */
+	/*
+	 * OWNER.  GetUserNameFromId() bypasses ACL checks, so verify pg_roles
+	 * access before resolving the owner's name.
+	 */
 	if (!no_owner && OidIsValid(dbform->datdba))
 	{
-		char	   *owner = GetUserNameFromId(dbform->datdba, false);
+		char	   *owner;
+		Oid			pgroles_relid = get_relname_relid("pg_roles", PG_CATALOG_NAMESPACE);
+
+		if (!OidIsValid(pgroles_relid) ||
+			pg_class_aclcheck(pgroles_relid, GetUserId(), ACL_SELECT) != ACLCHECK_OK)
+		{
+			ReleaseSysCache(tuple);
+			aclcheck_error(ACLCHECK_NO_PRIV, OBJECT_DATABASE, dbname);
+		}
+
+		owner = GetUserNameFromId(dbform->datdba, false);
 
 		appendStringInfo(&buf, "ALTER DATABASE %s OWNER TO %s;",
 						 quote_identifier(dbname), quote_identifier(owner));
