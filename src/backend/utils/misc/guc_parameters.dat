@@ -1217,6 +1217,15 @@
   boot_val => 'false',
 },
 
+{ name => 'hash_build_sort_mode', type => 'enum', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Forces or disables the sort step during hash index builds.',
+  long_desc => 'The default, auto, sorts only when the initial index size exceeds "maintenance_work_mem" or the number of usable buffers, whichever is less.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'hash_build_sort_mode',
+  boot_val => 'HASH_BUILD_SORT_AUTO',
+  options => 'hash_build_sort_mode_options',
+},
+
 { name => 'hash_mem_multiplier', type => 'real', context => 'PGC_USERSET', group => 'RESOURCES_MEM',
   short_desc => 'Multiple of "work_mem" to use for hash tables.',
   flags => 'GUC_EXPLAIN',

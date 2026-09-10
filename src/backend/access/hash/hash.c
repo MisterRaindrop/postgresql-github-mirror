@@ -61,6 +61,13 @@ static BlockNumber hash_bulkdelete_read_stream_cb(ReadStream *stream,
 												  void *callback_private_data,
 												  void *per_buffer_data);
 
+/*
+ * Developer GUC: override the automatic choice of whether hashbuild() sorts
+ * index tuples by bucket number.  Defaults to HASH_BUILD_SORT_AUTO, which
+ * preserves the historical behavior.  See hashbuild().
+ */
+int			hash_build_sort_mode = HASH_BUILD_SORT_AUTO;
+
 
 /*
  * Hash handler function: return IndexAmRoutine with access method parameters
@@ -140,6 +147,7 @@ hashbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	double		allvisfrac;
 	uint32		num_buckets;
 	Size		sort_threshold;
+	bool		do_sort;
 	HashBuildState buildstate;
 
 	/*
@@ -173,6 +181,12 @@ hashbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	 * NOTE: this test will need adjustment if a bucket is ever different from
 	 * one page.  Also, "initial index size" accounting does not include the
 	 * metapage, nor the first bitmap page.
+	 *
+	 * The hash_build_sort_mode developer GUC can override this decision, so
+	 * that the sorted and unsorted paths can be compared at a fixed row count
+	 * and a fixed maintenance_work_mem.  Without it, the only way to reach the
+	 * unsorted path is to raise maintenance_work_mem, which also changes how
+	 * much memory the sort itself gets, confounding the comparison.
 	 */
 	sort_threshold = (maintenance_work_mem * (Size) 1024) / BLCKSZ;
 	if (index->rd_rel->relpersistence != RELPERSISTENCE_TEMP)
@@ -180,7 +194,21 @@ hashbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	else
 		sort_threshold = Min(sort_threshold, NLocBuffer);
 
-	if (num_buckets >= sort_threshold)
+	switch (hash_build_sort_mode)
+	{
+		case HASH_BUILD_SORT_ON:
+			do_sort = true;
+			break;
+		case HASH_BUILD_SORT_OFF:
+			do_sort = false;
+			break;
+		case HASH_BUILD_SORT_AUTO:
+		default:
+			do_sort = (num_buckets >= sort_threshold);
+			break;
+	}
+
+	if (do_sort)
 		buildstate.spool = _h_spoolinit(heap, index, num_buckets);
 	else
 		buildstate.spool = NULL;

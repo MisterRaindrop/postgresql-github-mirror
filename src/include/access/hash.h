@@ -358,6 +358,22 @@ typedef struct HashOptions
 #define HASHNProcs				3
 
 
+/*
+ * Values for the hash_build_sort_mode developer GUC, which overrides the
+ * automatic choice of whether hashbuild() sorts index tuples by bucket
+ * number.  HASH_BUILD_SORT_AUTO must be the boot value: it leaves the
+ * historical maintenance_work_mem/NBuffers test in force.
+ */
+typedef enum HashBuildSortMode
+{
+	HASH_BUILD_SORT_AUTO = 0,
+	HASH_BUILD_SORT_ON,
+	HASH_BUILD_SORT_OFF,
+} HashBuildSortMode;
+
+extern PGDLLIMPORT int hash_build_sort_mode;
+
+
 /* public routines */
 
 extern IndexBuildResult *hashbuild(Relation heap, Relation index,
