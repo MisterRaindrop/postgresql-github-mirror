@@ -51,7 +51,7 @@ static void append_ddl_option(StringInfo buf, bool pretty, int indent,
 static void append_guc_value(StringInfo buf, const char *name,
 							 const char *value);
 static List *pg_get_role_ddl_internal(Oid roleid, bool pretty,
-									  bool memberships);
+									  bool memberships, bool password);
 static List *pg_get_tablespace_ddl_internal(Oid tsid, bool pretty, bool no_owner);
 static Datum pg_get_tablespace_ddl_srf(FunctionCallInfo fcinfo, Oid tsid);
 static List *pg_get_database_ddl_internal(Oid dbid, bool pretty,
@@ -140,18 +140,22 @@ append_guc_value(StringInfo buf, const char *name, const char *value)
  *		Generate DDL statements to recreate a role
  *
  * Returns a List of palloc'd strings, each being a complete SQL statement.
- * The first list element is always the CREATE ROLE statement; subsequent
- * elements are ALTER ROLE SET statements for any role-specific or
- * role-in-database configuration settings.  If memberships is true,
- * GRANT statements for role memberships are appended.
+ * The first two list elements are always the CREATE ROLE statement and an
+ * ALTER ROLE statement carrying the role attributes; subsequent elements are
+ * ALTER ROLE SET statements for any role-specific or role-in-database
+ * configuration settings.  If memberships is true, GRANT statements for
+ * role memberships are appended.  If password is false, the PASSWORD
+ * clause is omitted.
  */
 static List *
-pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships)
+pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships,
+						 bool password)
 {
 	HeapTuple	tuple;
 	Form_pg_authid roleform;
 	StringInfoData buf;
 	char	   *rolname;
+	Datum		rolpassword;
 	Datum		rolevaliduntil;
 	bool		isnull;
 	Relation	rel;
@@ -168,8 +172,13 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships)
 	roleform = (Form_pg_authid) GETSTRUCT(tuple);
 	rolname = pstrdup(NameStr(roleform->rolname));
 
-	/* User must have SELECT privilege on pg_authid. */
-	if (pg_class_aclcheck(AuthIdRelationId, GetUserId(), ACL_SELECT) != ACLCHECK_OK)
+	/*
+	 * rolpassword needs SELECT on pg_authid; nothing else here is
+	 * sensitive, so only check it when the PASSWORD clause is wanted.
+	 */
+	if (password &&
+		pg_class_aclcheck(AuthIdRelationId, GetUserId(),
+						  ACL_SELECT) != ACLCHECK_OK)
 	{
 		ReleaseSysCache(tuple);
 		ereport(ERROR,
@@ -188,11 +197,20 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships)
 				 errdetail("Role names starting with \"pg_\" are reserved for system roles.")));
 
 	initStringInfo(&buf);
-	appendStringInfo(&buf, "CREATE ROLE %s", quote_identifier(rolname));
+
+	/*
+	 * Attributes go in a separate ALTER ROLE, as pg_dumpall does, so they
+	 * still apply when replayed over a role that already exists.
+	 */
+	appendStringInfo(&buf, "CREATE ROLE %s;", quote_identifier(rolname));
+	statements = lappend(statements, pstrdup(buf.data));
+
+	resetStringInfo(&buf);
+	appendStringInfo(&buf, "ALTER ROLE %s WITH", quote_identifier(rolname));
 
 	/*
 	 * Append role attributes.  The order here follows the same sequence as
-	 * you'd typically write them in a CREATE ROLE command, though any order
+	 * you'd typically write them in an ALTER ROLE command, though any order
 	 * is actually acceptable to the parser.
 	 */
 	append_ddl_option(&buf, pretty, 4, "%s",
@@ -224,6 +242,19 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships)
 		append_ddl_option(&buf, pretty, 4, "CONNECTION LIMIT %d",
 						  roleform->rolconnlimit);
 
+	/* PASSWORD is the stored verifier; the plaintext isn't recoverable. */
+	rolpassword = SysCacheGetAttr(AUTHOID, tuple,
+								  Anum_pg_authid_rolpassword,
+								  &isnull);
+	if (password && !isnull)
+	{
+		char	   *verifier = TextDatumGetCString(rolpassword);
+
+		append_ddl_option(&buf, pretty, 4, "PASSWORD %s",
+						  quote_literal_cstr(verifier));
+		pfree(verifier);
+	}
+
 	rolevaliduntil = SysCacheGetAttr(AUTHOID, tuple,
 									 Anum_pg_authid_rolvaliduntil,
 									 &isnull);
@@ -251,13 +282,6 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships)
 	}
 
 	ReleaseSysCache(tuple);
-
-	/*
-	 * We intentionally omit PASSWORD.  There's no way to retrieve the
-	 * original password text from the stored hash, and even if we could,
-	 * exposing passwords through a SQL function would be a security issue.
-	 * Users must set passwords separately after recreating roles.
-	 */
 
 	appendStringInfoChar(&buf, ';');
 
@@ -367,9 +391,15 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships)
 	 * Scan pg_auth_members for role memberships.  We look for rows where
 	 * member = roleid, meaning this role has been granted membership in other
 	 * roles.
+	 *
+	 * A grantor needs ADMIN OPTION on the granted role already, and the
+	 * only grant of ours that can supply that is a self-grant, so
+	 * self-granted rows must sort last.
 	 */
 	if (memberships)
 	{
+		List	   *self_granted = NIL;
+
 		rel = table_open(AuthMemRelationId, AccessShareLock);
 		ScanKeyInit(&scankey,
 					Anum_pg_auth_members_member,
@@ -398,7 +428,11 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships)
 			appendStringInfo(&buf, " GRANTED BY %s;",
 							 quote_identifier(grantor));
 
-			statements = lappend(statements, pstrdup(buf.data));
+			/* Self-grants wait for the grant that gave ADMIN OPTION. */
+			if (memform->grantor == roleid)
+				self_granted = lappend(self_granted, pstrdup(buf.data));
+			else
+				statements = lappend(statements, pstrdup(buf.data));
 
 			pfree(granted_role);
 			pfree(grantor);
@@ -406,6 +440,8 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships)
 
 		systable_endscan(scan);
 		table_close(rel, AccessShareLock);
+
+		statements = list_concat(statements, self_granted);
 	}
 
 	pfree(buf.data);
@@ -418,9 +454,10 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships)
  * pg_get_role_ddl
  *		Return DDL to recreate a role as a set of text rows.
  *
- * Each row is a complete SQL statement.  The first row is always the
- * CREATE ROLE statement; subsequent rows are ALTER ROLE SET statements
- * and optionally GRANT statements for role memberships.
+ * Each row is a complete SQL statement.  The first two rows are always the
+ * CREATE ROLE statement and the ALTER ROLE statement carrying the role
+ * attributes; subsequent rows are ALTER ROLE SET statements and optionally
+ * GRANT statements for role memberships.
  */
 Datum
 pg_get_role_ddl(PG_FUNCTION_ARGS)
@@ -434,6 +471,7 @@ pg_get_role_ddl(PG_FUNCTION_ARGS)
 		Oid			roleid;
 		bool		pretty;
 		bool		memberships;
+		bool		password;
 
 		funcctx = SRF_FIRSTCALL_INIT();
 		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
@@ -441,8 +479,10 @@ pg_get_role_ddl(PG_FUNCTION_ARGS)
 		roleid = PG_GETARG_OID(0);
 		pretty = PG_GETARG_BOOL(1);
 		memberships = PG_GETARG_BOOL(2);
+		password = PG_GETARG_BOOL(3);
 
-		statements = pg_get_role_ddl_internal(roleid, pretty, memberships);
+		statements = pg_get_role_ddl_internal(roleid, pretty, memberships,
+											  password);
 		funcctx->user_fctx = statements;
 		funcctx->max_calls = list_length(statements);
 
