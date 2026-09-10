@@ -21,6 +21,7 @@
 #include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/table.h"
+#include "catalog/dependency.h"
 #include "catalog/pg_auth_members.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_collation.h"
@@ -50,7 +51,8 @@ static void append_ddl_option(StringInfo buf, bool pretty, int indent,
 static void append_guc_value(StringInfo buf, const char *name,
 							 const char *value);
 static List *pg_get_role_ddl_internal(Oid roleid, bool pretty,
-									  bool memberships, bool password);
+									  bool memberships, bool password,
+									  bool in_database_settings);
 static List *pg_get_tablespace_ddl_internal(Oid tsid, bool pretty, bool no_owner);
 static Datum pg_get_tablespace_ddl_srf(FunctionCallInfo fcinfo, Oid tsid);
 static List *pg_get_database_ddl_internal(Oid dbid, bool pretty,
@@ -139,16 +141,13 @@ append_guc_value(StringInfo buf, const char *name, const char *value)
  *		Generate DDL statements to recreate a role
  *
  * Returns a List of palloc'd strings, each being a complete SQL statement.
- * The first two list elements are always the CREATE ROLE statement and an
- * ALTER ROLE statement carrying the role attributes; subsequent elements are
- * ALTER ROLE SET statements for any role-specific or role-in-database
- * configuration settings.  If memberships is true, GRANT statements for
- * role memberships are appended.  If password is false, the PASSWORD
- * clause is omitted.
+ * The first two elements are the CREATE ROLE statement and an ALTER ROLE
+ * carrying the attributes; the rest are ALTER ROLE SET statements, plus
+ * GRANT statements for memberships if requested.
  */
 static List *
 pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships,
-						 bool password)
+						 bool password, bool in_database_settings)
 {
 	HeapTuple	tuple;
 	Form_pg_authid roleform;
@@ -170,6 +169,12 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships,
 
 	roleform = (Form_pg_authid) GETSTRUCT(tuple);
 	rolname = pstrdup(NameStr(roleform->rolname));
+
+	/*
+	 * Lock and re-verify existence, closing the window for a concurrent
+	 * DROP ROLE before the scans below.
+	 */
+	shdepLockAndCheckObject(AuthIdRelationId, roleid);
 
 	/*
 	 * rolpassword needs SELECT on pg_authid; nothing else here is
@@ -314,11 +319,16 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships,
 
 		/*
 		 * If setdatabase is valid, this is a role-in-database setting;
-		 * otherwise it's a role-wide setting.  Look up the database name once
-		 * for all settings in this row.
+		 * otherwise it's a role-wide setting.  In-database settings depend on
+		 * that database already existing, so they're optional; role-wide ones
+		 * are not.  Look up the database name once for all settings in this
+		 * row.
 		 */
 		if (OidIsValid(datid))
 		{
+			if (!in_database_settings)
+				continue;
+
 			datname = get_database_name(datid);
 			/* Database has been dropped; skip all settings in this row. */
 			if (datname == NULL)
@@ -471,6 +481,7 @@ pg_get_role_ddl(PG_FUNCTION_ARGS)
 		bool		pretty;
 		bool		memberships;
 		bool		password;
+		bool		in_database_settings;
 
 		funcctx = SRF_FIRSTCALL_INIT();
 		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
@@ -479,9 +490,10 @@ pg_get_role_ddl(PG_FUNCTION_ARGS)
 		pretty = PG_GETARG_BOOL(1);
 		memberships = PG_GETARG_BOOL(2);
 		password = PG_GETARG_BOOL(3);
+		in_database_settings = PG_GETARG_BOOL(4);
 
 		statements = pg_get_role_ddl_internal(roleid, pretty, memberships,
-											  password);
+											  password, in_database_settings);
 		funcctx->user_fctx = statements;
 		funcctx->max_calls = list_length(statements);
 
@@ -537,7 +549,14 @@ pg_get_tablespace_ddl_internal(Oid tsid, bool pretty, bool no_owner)
 	tspForm = (Form_pg_tablespace) GETSTRUCT(tuple);
 	spcname = pstrdup(NameStr(tspForm->spcname));
 
-	/* User must have SELECT privilege on pg_tablespace. */
+	/* Guard against a concurrent DROP TABLESPACE, as for roles/databases. */
+	shdepLockAndCheckObject(TableSpaceRelationId, tsid);
+
+	/*
+	 * User must have SELECT privilege on pg_tablespace.  As in
+	 * pg_get_role_ddl_internal(), the error below names the tablespace, not
+	 * pg_tablespace, for the same reason.
+	 */
 	if (pg_class_aclcheck(TableSpaceRelationId, GetUserId(), ACL_SELECT) != ACLCHECK_OK)
 	{
 		ReleaseSysCache(tuple);
@@ -743,6 +762,12 @@ pg_get_database_ddl_internal(Oid dbid, bool pretty,
 
 	dbform = (Form_pg_database) GETSTRUCT(tuple);
 	dbname = pstrdup(NameStr(dbform->datname));
+
+	/*
+	 * Lock and re-verify existence, closing the window for a concurrent
+	 * DROP DATABASE before the scan below.
+	 */
+	shdepLockAndCheckObject(DatabaseRelationId, dbid);
 
 	/*
 	 * Reject invalid databases. Deparsing a pg_database row in invalid state
