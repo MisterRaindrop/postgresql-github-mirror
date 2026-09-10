@@ -40,7 +40,6 @@
 #include "utils/lsyscache.h"
 #include "utils/pg_locale.h"
 #include "utils/rel.h"
-#include "utils/ruleutils.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
 #include "utils/varlena.h"
@@ -597,10 +596,30 @@ pg_get_tablespace_ddl_internal(Oid tsid, bool pretty, bool no_owner)
 							Anum_pg_tablespace_spcoptions, &isNull);
 	if (!isNull)
 	{
+		Datum	   *options;
+		int			noptions;
+
 		resetStringInfo(&buf);
 		appendStringInfo(&buf, "ALTER TABLESPACE %s SET (",
 						 quote_identifier(spcname));
-		get_reloptions(&buf, datum);
+
+		/*
+		 * Elements are already "name=value", and every option is numeric,
+		 * so emit verbatim, matching pg_dumpall.
+		 */
+		deconstruct_array_builtin(DatumGetArrayTypeP(datum), TEXTOID,
+								  &options, NULL, &noptions);
+		for (int i = 0; i < noptions; i++)
+		{
+			char	   *option = TextDatumGetCString(options[i]);
+
+			if (i > 0)
+				appendStringInfoString(&buf, ", ");
+			appendStringInfoString(&buf, option);
+			pfree(option);
+		}
+		pfree(options);
+
 		appendStringInfoString(&buf, ");");
 		statements = lappend(statements, pstrdup(buf.data));
 	}
@@ -819,8 +838,13 @@ pg_get_database_ddl_internal(Oid dbid, bool pretty,
 		append_ddl_option(&buf, pretty, 4, "ICU_RULES = %s",
 						  quote_literal_cstr(TextDatumGetCString(datum)));
 
-	/* TABLESPACE */
-	if (!no_tablespace && OidIsValid(dbform->dattablespace))
+	/*
+	 * TABLESPACE.  Skip the default tablespace.  Compare by OID: tablespace
+	 * names are case-sensitive, so a user-defined "PG_DEFAULT" is a
+	 * different, valid tablespace.
+	 */
+	if (!no_tablespace && OidIsValid(dbform->dattablespace) &&
+		dbform->dattablespace != DEFAULTTABLESPACE_OID)
 	{
 		char	   *spcname = get_tablespace_name(dbform->dattablespace);
 
@@ -831,9 +855,8 @@ pg_get_database_ddl_internal(Oid dbid, bool pretty,
 							dbform->dattablespace),
 					 errdetail("It may have been concurrently dropped.")));
 
-		if (pg_strcasecmp(spcname, "pg_default") != 0)
-			append_ddl_option(&buf, pretty, 4, "TABLESPACE = %s",
-							  quote_identifier(spcname));
+		append_ddl_option(&buf, pretty, 4, "TABLESPACE = %s",
+						  quote_identifier(spcname));
 	}
 
 	appendStringInfoChar(&buf, ';');
