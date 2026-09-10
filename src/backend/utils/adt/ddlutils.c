@@ -35,7 +35,6 @@
 #include "miscadmin.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
-#include "utils/datetime.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -50,6 +49,13 @@ static void append_ddl_option(StringInfo buf, bool pretty, int indent,
 			pg_attribute_printf(4, 5);
 static void append_guc_value(StringInfo buf, const char *name,
 							 const char *value);
+static void push_statement(List **statements, StringInfo buf);
+static Datum ddl_statements_srf(FunctionCallInfo fcinfo,
+								List *(*getstatements) (void *arg),
+								void *arg);
+static List *get_role_ddl_statements(void *arg);
+static List *get_tablespace_ddl_statements(void *arg);
+static List *get_database_ddl_statements(void *arg);
 static List *pg_get_role_ddl_internal(Oid roleid, bool pretty,
 									  bool memberships, bool password,
 									  bool in_database_settings);
@@ -137,6 +143,19 @@ append_guc_value(StringInfo buf, const char *name, const char *value)
 }
 
 /*
+ * push_statement
+ *		Append the SQL text currently in buf to *statements as a
+ *		separate, complete statement, then reset buf so the caller can
+ *		build the next one.
+ */
+static void
+push_statement(List **statements, StringInfo buf)
+{
+	*statements = lappend(*statements, pstrdup(buf->data));
+	resetStringInfo(buf);
+}
+
+/*
  * pg_get_role_ddl_internal
  *		Generate DDL statements to recreate a role
  *
@@ -171,12 +190,6 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships,
 	rolname = pstrdup(NameStr(roleform->rolname));
 
 	/*
-	 * Lock and re-verify existence, closing the window for a concurrent
-	 * DROP ROLE before the scans below.
-	 */
-	shdepLockAndCheckObject(AuthIdRelationId, roleid);
-
-	/*
 	 * rolpassword needs SELECT on pg_authid; nothing else here is
 	 * sensitive, so only check it when the PASSWORD clause is wanted.
 	 */
@@ -189,6 +202,12 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("permission denied for role %s", rolname)));
 	}
+
+	/*
+	 * Lock and re-verify existence, closing the window for a concurrent
+	 * DROP ROLE before the scans below.
+	 */
+	shdepLockAndCheckObject(AuthIdRelationId, roleid);
 
 	/*
 	 * We don't support generating DDL for system roles.  The primary reason
@@ -207,9 +226,8 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships,
 	 * still apply when replayed over a role that already exists.
 	 */
 	appendStringInfo(&buf, "CREATE ROLE %s;", quote_identifier(rolname));
-	statements = lappend(statements, pstrdup(buf.data));
+	push_statement(&statements, &buf);
 
-	resetStringInfo(&buf);
 	appendStringInfo(&buf, "ALTER ROLE %s WITH", quote_identifier(rolname));
 
 	/*
@@ -264,32 +282,21 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships,
 									 &isnull);
 	if (!isnull)
 	{
-		TimestampTz ts;
-		int			tz;
-		struct pg_tm tm;
-		fsec_t		fsec;
-		const char *tzn;
-		char		ts_str[MAXDATELEN + 1];
-
-		ts = DatumGetTimestampTz(rolevaliduntil);
-		if (TIMESTAMP_NOT_FINITE(ts))
-			EncodeSpecialTimestamp(ts, ts_str);
-		else if (timestamp2tm(ts, &tz, &tm, &fsec, &tzn, NULL) == 0)
-			EncodeDateTime(&tm, fsec, true, tz, tzn, USE_ISO_DATES, ts_str);
-		else
-			ereport(ERROR,
-					(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
-					 errmsg("timestamp out of range")));
-
+		/*
+		 * timestamptz_to_str() already formats in ISO style regardless of the
+		 * session's DateStyle, which is what we want here: the output must
+		 * parse the same in any receiving session.  timestamptz_out() is not
+		 * a substitute -- it honors DateStyle.
+		 */
 		append_ddl_option(&buf, pretty, 4, "VALID UNTIL %s",
-						  quote_literal_cstr(ts_str));
+						  quote_literal_cstr(timestamptz_to_str(DatumGetTimestampTz(rolevaliduntil))));
 	}
 
 	ReleaseSysCache(tuple);
 
 	appendStringInfoChar(&buf, ';');
 
-	statements = lappend(statements, pstrdup(buf.data));
+	push_statement(&statements, &buf);
 
 	/*
 	 * Now scan pg_db_role_setting for ALTER ROLE SET configurations.
@@ -366,7 +373,6 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships,
 			*p++ = '\0';
 
 			/* Build a fresh ALTER ROLE statement for this setting */
-			resetStringInfo(&buf);
 			appendStringInfo(&buf, "ALTER ROLE %s", quote_identifier(rolname));
 
 			if (datname != NULL)
@@ -380,7 +386,7 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships,
 
 			appendStringInfoChar(&buf, ';');
 
-			statements = lappend(statements, pstrdup(buf.data));
+			push_statement(&statements, &buf);
 
 			pfree(s);
 		}
@@ -426,7 +432,6 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships,
 			granted_role = GetUserNameFromId(memform->roleid, false);
 			grantor = GetUserNameFromId(memform->grantor, false);
 
-			resetStringInfo(&buf);
 			appendStringInfo(&buf, "GRANT %s TO %s",
 							 quote_identifier(granted_role),
 							 quote_identifier(rolname));
@@ -439,9 +444,9 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships,
 
 			/* Self-grants wait for the grant that gave ADMIN OPTION. */
 			if (memform->grantor == roleid)
-				self_granted = lappend(self_granted, pstrdup(buf.data));
+				push_statement(&self_granted, &buf);
 			else
-				statements = lappend(statements, pstrdup(buf.data));
+				push_statement(&statements, &buf);
 
 			pfree(granted_role);
 			pfree(grantor);
@@ -460,16 +465,16 @@ pg_get_role_ddl_internal(Oid roleid, bool pretty, bool memberships,
 }
 
 /*
- * pg_get_role_ddl
- *		Return DDL to recreate a role as a set of text rows.
+ * ddl_statements_srf
+ *		Shared SRF driver for the pg_get_*_ddl() family.
  *
- * Each row is a complete SQL statement.  The first two rows are always the
- * CREATE ROLE statement and the ALTER ROLE statement carrying the role
- * attributes; subsequent rows are ALTER ROLE SET statements and optionally
- * GRANT statements for role memberships.
+ * getstatements(arg) is called once, returning a List of palloc'd
+ * statement strings; subsequent calls stream it out one row per call.
  */
-Datum
-pg_get_role_ddl(PG_FUNCTION_ARGS)
+static Datum
+ddl_statements_srf(FunctionCallInfo fcinfo,
+				   List *(*getstatements) (void *arg),
+				   void *arg)
 {
 	FuncCallContext *funcctx;
 	List	   *statements;
@@ -477,23 +482,11 @@ pg_get_role_ddl(PG_FUNCTION_ARGS)
 	if (SRF_IS_FIRSTCALL())
 	{
 		MemoryContext oldcontext;
-		Oid			roleid;
-		bool		pretty;
-		bool		memberships;
-		bool		password;
-		bool		in_database_settings;
 
 		funcctx = SRF_FIRSTCALL_INIT();
 		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
 
-		roleid = PG_GETARG_OID(0);
-		pretty = PG_GETARG_BOOL(1);
-		memberships = PG_GETARG_BOOL(2);
-		password = PG_GETARG_BOOL(3);
-		in_database_settings = PG_GETARG_BOOL(4);
-
-		statements = pg_get_role_ddl_internal(roleid, pretty, memberships,
-											  password, in_database_settings);
+		statements = getstatements(arg);
 		funcctx->user_fctx = statements;
 		funcctx->max_calls = list_length(statements);
 
@@ -505,17 +498,49 @@ pg_get_role_ddl(PG_FUNCTION_ARGS)
 
 	if (funcctx->call_cntr < funcctx->max_calls)
 	{
-		char	   *stmt;
-
-		stmt = list_nth(statements, funcctx->call_cntr);
+		char	   *stmt = (char *) list_nth(statements, funcctx->call_cntr);
 
 		SRF_RETURN_NEXT(funcctx, CStringGetTextDatum(stmt));
 	}
-	else
-	{
-		list_free_deep(statements);
-		SRF_RETURN_DONE(funcctx);
-	}
+
+	list_free_deep(statements);
+	SRF_RETURN_DONE(funcctx);
+}
+
+struct RoleDdlArgs
+{
+	Oid			roleid;
+	bool		pretty;
+	bool		memberships;
+	bool		password;
+	bool		in_database_settings;
+};
+
+static List *
+get_role_ddl_statements(void *arg)
+{
+	struct RoleDdlArgs *a = (struct RoleDdlArgs *) arg;
+
+	return pg_get_role_ddl_internal(a->roleid, a->pretty, a->memberships,
+									a->password, a->in_database_settings);
+}
+
+/*
+ * pg_get_role_ddl
+ *		Return DDL to recreate a role as a set of text rows.
+ */
+Datum
+pg_get_role_ddl(PG_FUNCTION_ARGS)
+{
+	struct RoleDdlArgs args;
+
+	args.roleid = PG_GETARG_OID(0);
+	args.pretty = PG_GETARG_BOOL(1);
+	args.memberships = PG_GETARG_BOOL(2);
+	args.password = PG_GETARG_BOOL(3);
+	args.in_database_settings = PG_GETARG_BOOL(4);
+
+	return ddl_statements_srf(fcinfo, get_role_ddl_statements, &args);
 }
 
 /*
@@ -549,19 +574,19 @@ pg_get_tablespace_ddl_internal(Oid tsid, bool pretty, bool no_owner)
 	tspForm = (Form_pg_tablespace) GETSTRUCT(tuple);
 	spcname = pstrdup(NameStr(tspForm->spcname));
 
-	/* Guard against a concurrent DROP TABLESPACE, as for roles/databases. */
-	shdepLockAndCheckObject(TableSpaceRelationId, tsid);
-
 	/*
-	 * User must have SELECT privilege on pg_tablespace.  As in
-	 * pg_get_role_ddl_internal(), the error below names the tablespace, not
-	 * pg_tablespace, for the same reason.
+	 * Everything this emits is public by default, so what matters is
+	 * catalog SELECT on pg_tablespace, not any object-specific privilege.
 	 */
-	if (pg_class_aclcheck(TableSpaceRelationId, GetUserId(), ACL_SELECT) != ACLCHECK_OK)
+	if (pg_class_aclcheck(TableSpaceRelationId, GetUserId(),
+						  ACL_SELECT) != ACLCHECK_OK)
 	{
 		ReleaseSysCache(tuple);
 		aclcheck_error(ACLCHECK_NO_PRIV, OBJECT_TABLESPACE, spcname);
 	}
+
+	/* Guard against a concurrent DROP TABLESPACE, as for roles/databases. */
+	shdepLockAndCheckObject(TableSpaceRelationId, tsid);
 
 	/*
 	 * We don't support generating DDL for system tablespaces.  The primary
@@ -608,7 +633,7 @@ pg_get_tablespace_ddl_internal(Oid tsid, bool pretty, bool no_owner)
 	pfree(path);
 
 	appendStringInfoChar(&buf, ';');
-	statements = lappend(statements, pstrdup(buf.data));
+	push_statement(&statements, &buf);
 
 	/* Check for tablespace options */
 	datum = SysCacheGetAttr(TABLESPACEOID, tuple,
@@ -618,7 +643,6 @@ pg_get_tablespace_ddl_internal(Oid tsid, bool pretty, bool no_owner)
 		Datum	   *options;
 		int			noptions;
 
-		resetStringInfo(&buf);
 		appendStringInfo(&buf, "ALTER TABLESPACE %s SET (",
 						 quote_identifier(spcname));
 
@@ -640,7 +664,7 @@ pg_get_tablespace_ddl_internal(Oid tsid, bool pretty, bool no_owner)
 		pfree(options);
 
 		appendStringInfoString(&buf, ");");
-		statements = lappend(statements, pstrdup(buf.data));
+		push_statement(&statements, &buf);
 	}
 
 	ReleaseSysCache(tuple);
@@ -650,50 +674,36 @@ pg_get_tablespace_ddl_internal(Oid tsid, bool pretty, bool no_owner)
 	return statements;
 }
 
+struct TablespaceDdlArgs
+{
+	Oid			tsid;
+	bool		pretty;
+	bool		no_owner;
+};
+
+static List *
+get_tablespace_ddl_statements(void *arg)
+{
+	struct TablespaceDdlArgs *a = (struct TablespaceDdlArgs *) arg;
+
+	return pg_get_tablespace_ddl_internal(a->tsid, a->pretty, a->no_owner);
+}
+
 /*
- * pg_get_tablespace_ddl_srf - common SRF logic for tablespace DDL
+ * pg_get_tablespace_ddl_srf
+ *		Extract arguments and hand off to the shared SRF driver; called by
+ *		both the OID- and name-based pg_get_tablespace_ddl() entry points.
  */
 static Datum
 pg_get_tablespace_ddl_srf(FunctionCallInfo fcinfo, Oid tsid)
 {
-	FuncCallContext *funcctx;
-	List	   *statements;
+	struct TablespaceDdlArgs args;
 
-	if (SRF_IS_FIRSTCALL())
-	{
-		MemoryContext oldcontext;
-		bool		pretty;
-		bool		no_owner;
+	args.tsid = tsid;
+	args.pretty = PG_GETARG_BOOL(1);
+	args.no_owner = !PG_GETARG_BOOL(2);
 
-		funcctx = SRF_FIRSTCALL_INIT();
-		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
-
-		pretty = PG_GETARG_BOOL(1);
-		no_owner = !PG_GETARG_BOOL(2);
-
-		statements = pg_get_tablespace_ddl_internal(tsid, pretty, no_owner);
-		funcctx->user_fctx = statements;
-		funcctx->max_calls = list_length(statements);
-
-		MemoryContextSwitchTo(oldcontext);
-	}
-
-	funcctx = SRF_PERCALL_SETUP();
-	statements = (List *) funcctx->user_fctx;
-
-	if (funcctx->call_cntr < funcctx->max_calls)
-	{
-		char	   *stmt;
-
-		stmt = (char *) list_nth(statements, funcctx->call_cntr);
-
-		SRF_RETURN_NEXT(funcctx, CStringGetTextDatum(stmt));
-	}
-	else
-	{
-		list_free_deep(statements);
-		SRF_RETURN_DONE(funcctx);
-	}
+	return ddl_statements_srf(fcinfo, get_tablespace_ddl_statements, &args);
 }
 
 /*
@@ -754,7 +764,11 @@ pg_get_database_ddl_internal(Oid dbid, bool pretty,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("database with OID %u does not exist", dbid)));
 
-	/* User must have connect privilege for target database. */
+	/*
+	 * User must have connect privilege for target database.  Check this
+	 * before taking any lock below: a caller who can't connect to the
+	 * database has no business holding a lock on it either.
+	 */
 	aclresult = object_aclcheck(DatabaseRelationId, dbid, GetUserId(), ACL_CONNECT);
 	if (aclresult != ACLCHECK_OK)
 		aclcheck_error(aclresult, OBJECT_DATABASE,
@@ -885,45 +899,41 @@ pg_get_database_ddl_internal(Oid dbid, bool pretty,
 	}
 
 	appendStringInfoChar(&buf, ';');
-	statements = lappend(statements, pstrdup(buf.data));
+	push_statement(&statements, &buf);
 
 	/* OWNER */
 	if (!no_owner && OidIsValid(dbform->datdba))
 	{
 		char	   *owner = GetUserNameFromId(dbform->datdba, false);
 
-		resetStringInfo(&buf);
 		appendStringInfo(&buf, "ALTER DATABASE %s OWNER TO %s;",
 						 quote_identifier(dbname), quote_identifier(owner));
 		pfree(owner);
-		statements = lappend(statements, pstrdup(buf.data));
+		push_statement(&statements, &buf);
 	}
 
 	/* CONNECTION LIMIT */
 	if (dbform->datconnlimit != -1)
 	{
-		resetStringInfo(&buf);
 		appendStringInfo(&buf, "ALTER DATABASE %s CONNECTION LIMIT = %d;",
 						 quote_identifier(dbname), dbform->datconnlimit);
-		statements = lappend(statements, pstrdup(buf.data));
+		push_statement(&statements, &buf);
 	}
 
 	/* IS_TEMPLATE */
 	if (dbform->datistemplate)
 	{
-		resetStringInfo(&buf);
 		appendStringInfo(&buf, "ALTER DATABASE %s IS_TEMPLATE = true;",
 						 quote_identifier(dbname));
-		statements = lappend(statements, pstrdup(buf.data));
+		push_statement(&statements, &buf);
 	}
 
 	/* ALLOW_CONNECTIONS */
 	if (!dbform->datallowconn)
 	{
-		resetStringInfo(&buf);
 		appendStringInfo(&buf, "ALTER DATABASE %s ALLOW_CONNECTIONS = false;",
 						 quote_identifier(dbname));
-		statements = lappend(statements, pstrdup(buf.data));
+		push_statement(&statements, &buf);
 	}
 
 	ReleaseSysCache(tuple);
@@ -984,7 +994,6 @@ pg_get_database_ddl_internal(Oid dbid, bool pretty,
 			}
 			*p++ = '\0';
 
-			resetStringInfo(&buf);
 			appendStringInfo(&buf, "ALTER DATABASE %s SET %s TO ",
 							 quote_identifier(dbname),
 							 quote_identifier(s));
@@ -993,7 +1002,7 @@ pg_get_database_ddl_internal(Oid dbid, bool pretty,
 
 			appendStringInfoChar(&buf, ';');
 
-			statements = lappend(statements, pstrdup(buf.data));
+			push_statement(&statements, &buf);
 
 			pfree(s);
 		}
@@ -1012,6 +1021,23 @@ pg_get_database_ddl_internal(Oid dbid, bool pretty,
 	return statements;
 }
 
+struct DatabaseDdlArgs
+{
+	Oid			dbid;
+	bool		pretty;
+	bool		no_owner;
+	bool		no_tablespace;
+};
+
+static List *
+get_database_ddl_statements(void *arg)
+{
+	struct DatabaseDdlArgs *a = (struct DatabaseDdlArgs *) arg;
+
+	return pg_get_database_ddl_internal(a->dbid, a->pretty, a->no_owner,
+										a->no_tablespace);
+}
+
 /*
  * pg_get_database_ddl
  *		Return DDL to recreate a database as a set of text rows.
@@ -1019,47 +1045,12 @@ pg_get_database_ddl_internal(Oid dbid, bool pretty,
 Datum
 pg_get_database_ddl(PG_FUNCTION_ARGS)
 {
-	FuncCallContext *funcctx;
-	List	   *statements;
+	struct DatabaseDdlArgs args;
 
-	if (SRF_IS_FIRSTCALL())
-	{
-		MemoryContext oldcontext;
-		Oid			dbid;
-		bool		pretty;
-		bool		no_owner;
-		bool		no_tablespace;
+	args.dbid = PG_GETARG_OID(0);
+	args.pretty = PG_GETARG_BOOL(1);
+	args.no_owner = !PG_GETARG_BOOL(2);
+	args.no_tablespace = !PG_GETARG_BOOL(3);
 
-		funcctx = SRF_FIRSTCALL_INIT();
-		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
-
-		dbid = PG_GETARG_OID(0);
-		pretty = PG_GETARG_BOOL(1);
-		no_owner = !PG_GETARG_BOOL(2);
-		no_tablespace = !PG_GETARG_BOOL(3);
-
-		statements = pg_get_database_ddl_internal(dbid, pretty, no_owner,
-												  no_tablespace);
-		funcctx->user_fctx = statements;
-		funcctx->max_calls = list_length(statements);
-
-		MemoryContextSwitchTo(oldcontext);
-	}
-
-	funcctx = SRF_PERCALL_SETUP();
-	statements = (List *) funcctx->user_fctx;
-
-	if (funcctx->call_cntr < funcctx->max_calls)
-	{
-		char	   *stmt;
-
-		stmt = list_nth(statements, funcctx->call_cntr);
-
-		SRF_RETURN_NEXT(funcctx, CStringGetTextDatum(stmt));
-	}
-	else
-	{
-		list_free_deep(statements);
-		SRF_RETURN_DONE(funcctx);
-	}
+	return ddl_statements_srf(fcinfo, get_database_ddl_statements, &args);
 }
