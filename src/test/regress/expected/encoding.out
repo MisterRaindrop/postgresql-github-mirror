@@ -120,6 +120,18 @@ SELECT regexp_replace(with_nul, '^caf(.)$', '\1') FROM regress_encoding;
  é
 (1 row)
 
+SELECT octet_length(normalize(with_nul)) FROM regress_encoding;
+ octet_length 
+--------------
+            5
+(1 row)
+
+SELECT with_nul IS NORMALIZED FROM regress_encoding;
+ is_normalized 
+---------------
+ t
+(1 row)
+
 -- NUL = character
 SELECT with_nul, reverse(with_nul), reverse(reverse(with_nul)) FROM regress_encoding;
  with_nul | reverse | reverse 

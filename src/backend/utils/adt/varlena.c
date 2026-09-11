@@ -5537,7 +5537,7 @@ unicode_normalize_func(PG_FUNCTION_ARGS)
 		p += pg_utf_mblen(p);
 	}
 	input_chars[i] = (char32_t) '\0';
-	Assert((char *) p == VARDATA_ANY(input) + VARSIZE_ANY_EXHDR(input));
+	Assert((char *) p <= VARDATA_ANY(input) + VARSIZE_ANY_EXHDR(input));
 
 	/* action */
 	output_chars = unicode_normalize(form, input_chars);
@@ -5605,7 +5605,7 @@ unicode_is_normalized(PG_FUNCTION_ARGS)
 		p += pg_utf_mblen(p);
 	}
 	input_chars[i] = (char32_t) '\0';
-	Assert((char *) p == VARDATA_ANY(input) + VARSIZE_ANY_EXHDR(input));
+	Assert((char *) p <= VARDATA_ANY(input) + VARSIZE_ANY_EXHDR(input));
 
 	/* quick check (see UAX #15) */
 	quickcheck = unicode_is_normalized_quickcheck(form, input_chars);
