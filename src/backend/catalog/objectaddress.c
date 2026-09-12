@@ -919,7 +919,7 @@ static const struct object_type_map
 		"publication relation", OBJECT_PUBLICATION_REL
 	},
 	{
-		"publication exclusion", OBJECT_PUBLICATION_REL
+		"publication excluded relation", OBJECT_PUBLICATION_REL
 	},
 	{
 		"subscription", OBJECT_SUBSCRIPTION
@@ -1983,6 +1983,7 @@ get_object_address_publication_rel(List *object,
 	List	   *relname;
 	char	   *pubname;
 	Publication *pub;
+	HeapTuple	tup;
 
 	ObjectAddressSet(address, PublicationRelRelationId, InvalidOid);
 
@@ -2003,17 +2004,32 @@ get_object_address_publication_rel(List *object,
 		return address;
 	}
 
-	/* Find the publication relation mapping in syscache. */
-	address.objectId =
-		GetSysCacheOid2(PUBLICATIONRELMAP, Anum_pg_publication_rel_oid,
-						ObjectIdGetDatum(RelationGetRelid(relation)),
-						ObjectIdGetDatum(pub->oid));
-	if (OidIsValid(address.objectId) &&
-		pubrel_is_exclusion == isPublicationRelationExcept(address.objectId,
-														   missing_ok))
+	/*
+	 * Find the publication relation mapping in syscache.  Fetch the tuple
+	 * rather than just its OID, so that prexcept can be checked without a
+	 * second lookup.  A missing entry, or one of the other kind, falls
+	 * through to the not-found handling below.
+	 */
+	tup = SearchSysCache2(PUBLICATIONRELMAP,
+						  ObjectIdGetDatum(RelationGetRelid(relation)),
+						  ObjectIdGetDatum(pub->oid));
+	if (HeapTupleIsValid(tup))
 	{
-		*relp = relation;
-		return address;
+		/* Found row in pg_publication_rel */
+		Form_pg_publication_rel prform =
+			(Form_pg_publication_rel) GETSTRUCT(tup);
+		Oid			pubreloid = prform->oid;
+		bool		isexcept = prform->prexcept;
+
+		ReleaseSysCache(tup);
+
+		/* Treat a prexcept mismatch as not found. */
+		if (isexcept == pubrel_is_exclusion)
+		{
+			address.objectId = pubreloid;
+			*relp = relation;
+			return address;
+		}
 	}
 
 	if (!missing_ok)
@@ -2021,7 +2037,7 @@ get_object_address_publication_rel(List *object,
 		if (pubrel_is_exclusion)
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_OBJECT),
-					 errmsg("publication exclusion \"%s\" from publication \"%s\" does not exist",
+					 errmsg("publication excluded relation \"%s\" from publication \"%s\" does not exist",
 							RelationGetRelationName(relation), pubname)));
 		else
 			ereport(ERROR,
@@ -2030,15 +2046,13 @@ get_object_address_publication_rel(List *object,
 							RelationGetRelationName(relation), pubname)));
 	}
 
-	/* Treat a missing mapping or type/prexcept mismatch as not found. */
-	address.objectId = InvalidOid;
 	relation_close(relation, AccessShareLock);
 	return address;
 }
 
 /*
- * Return whether an existing pg_publication_rel entry represents a publication
- * EXCEPT entry.
+ * Return whether a pg_publication_rel entry represents a publication EXCEPT
+ * entry.
  */
 static bool
 isPublicationRelationExcept(Oid pubreloid, bool missing_ok)
@@ -2054,6 +2068,7 @@ isPublicationRelationExcept(Oid pubreloid, bool missing_ok)
 			elog(ERROR, "cache lookup failed for publication table %u",
 				 pubreloid);
 
+		/* fallback to a non-exclusion entry for an undefined object */
 		return false;
 	}
 
@@ -2284,7 +2299,6 @@ pg_get_object_address(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("unsupported object type \"%s\"", ttype)));
 	type = (ObjectType) itype;
-	pubrel_is_exclusion = (strcmp(ttype, "publication exclusion") == 0);
 
 	/*
 	 * Convert the text array to the representation appropriate for the given
@@ -2517,6 +2531,8 @@ pg_get_object_address(PG_FUNCTION_ARGS)
 	if (objnode == NULL)
 		elog(ERROR, "unrecognized object type: %d", type);
 
+	pubrel_is_exclusion =
+		(strcmp(ttype, "publication excluded relation") == 0);
 	if (pubrel_is_exclusion)
 	{
 		addr = get_object_address_publication_rel(castNode(List, objnode),
@@ -5006,7 +5022,7 @@ getObjectTypeDescription(const ObjectAddress *object, bool missing_ok)
 
 		case PublicationRelRelationId:
 			if (isPublicationRelationExcept(object->objectId, missing_ok))
-				appendStringInfoString(&buffer, "publication exclusion");
+				appendStringInfoString(&buffer, "publication excluded relation");
 			else
 				appendStringInfoString(&buffer, "publication relation");
 			break;
