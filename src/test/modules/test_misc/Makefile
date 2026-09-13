@@ -1,5 +1,7 @@
 # src/test/modules/test_misc/Makefile
 
+REGRESS = ddlutils
+
 TAP_TESTS = 1
 
 EXTRA_INSTALL=src/test/modules/injection_points \

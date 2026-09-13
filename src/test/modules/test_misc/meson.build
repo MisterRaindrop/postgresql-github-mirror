@@ -4,6 +4,15 @@ tests += {
   'name': 'test_misc',
   'sd': meson.current_source_dir(),
   'bd': meson.current_build_dir(),
+  'regress': {
+    'sql': [
+      'ddlutils',
+    ],
+    # The script grants/revokes on shared catalogs (pg_authid) and creates
+    # objects it doesn't clean up incrementally between statements, so it
+    # isn't safe to run against a live, persistent, possibly-shared cluster.
+    'runningcheck': false,
+  },
   'tap': {
     'env': {
        'enable_injection_points': get_option('injection_points') ? 'yes' : 'no',
@@ -20,10 +29,10 @@ tests += {
       't/009_log_temp_files.pl',
       't/010_index_concurrently_upsert.pl',
       't/011_lock_stats.pl',
-      't/012_ddlutils.pl',
       't/013_temp_obj_multisession.pl',
       't/014_log_statement_max_length.pl',
       't/015_temp_schema_exit_deferrable.pl',
+      't/016_ddlutils_pg_dump_crosscheck.pl',
     ],
     # The injection points are cluster-wide, so disable installcheck
     'runningcheck': false,
