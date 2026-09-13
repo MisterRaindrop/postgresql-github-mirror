@@ -485,7 +485,8 @@ alter table p1_c1 add constraint inh_check_constraint6 check (f1 < 10) enforced;
 alter table p1_c1 add constraint inh_check_constraint9 check (f1 < 10) not valid enforced;
 alter table p1 add constraint inh_check_constraint9 check (f1 < 10) not enforced;
 
--- the not-valid state of the child constraint will be ignored here.
+-- the not-valid state of the child constraint is preserved here, so the
+-- merged constraint becomes enforced but remains NOT VALID.
 alter table p1 add constraint inh_check_constraint10 check (f1 < 10) not enforced;
 alter table p1_c1 add constraint inh_check_constraint10 check (f1 < 10) not valid enforced;
 
@@ -534,6 +535,122 @@ from    pg_constraint
 where   conname = 'inh_check_constraint3' and contype = 'c'
 order by conrelid::regclass::text collate "C";
 drop table p1 cascade;
+
+-- Existing rows must be verified when merging a local ENFORCED constraint
+-- into an inherited NOT ENFORCED one
+create table p1(f1 int);
+create table p1_c1() inherits(p1);
+alter table p1 add constraint inh_check_constraint check (f1 > 0) not enforced;
+insert into p1_c1 values(-1);
+alter table p1_c1 add constraint inh_check_constraint check (f1 > 0); --error
+-- adding it as NOT VALID skips the verification, and the merged constraint
+-- must not be marked validated
+alter table p1_c1 add constraint inh_check_constraint check (f1 > 0) not valid; --ok
+select conrelid::regclass, conenforced, convalidated
+from pg_constraint where conname = 'inh_check_constraint'
+order by conrelid::regclass::text collate "C";
+alter table p1_c1 validate constraint inh_check_constraint; --error
+delete from p1_c1 where f1 = -1;
+alter table p1_c1 validate constraint inh_check_constraint; --ok
+drop table p1 cascade;
+
+-- with no violating rows the merge succeeds, and the verification allows the
+-- merged constraint to be marked validated.  ONLY is allowed without children.
+create table p1(f1 int);
+create table p1_c1() inherits(p1);
+alter table p1 add constraint inh_check_constraint check (f1 > 0) not enforced;
+insert into p1_c1 values(1);
+alter table only p1_c1 add constraint inh_check_constraint check (f1 > 0); --ok
+select conrelid::regclass, conenforced, convalidated
+from pg_constraint where conname = 'inh_check_constraint'
+order by conrelid::regclass::text collate "C";
+drop table p1 cascade;
+
+-- Promotion must cover all descendants, without changing inheritance counts.
+create table p1(f1 int);
+create table p1_c1() inherits(p1);
+create table p1_c2() inherits(p1_c1);
+alter table p1 add constraint inh_check_constraint check (f1 > 0) not enforced;
+-- ONLY must not silently change descendants, with or without validation.
+alter table only p1_c1 add constraint inh_check_constraint check (f1 > 0); --error
+alter table only p1_c1 add constraint inh_check_constraint check (f1 > 0) not valid; --error
+select conrelid::regclass, conislocal, conenforced, convalidated
+from pg_constraint where conname = 'inh_check_constraint'
+order by conrelid::regclass::text collate "C";
+insert into p1_c2 values(-1);
+alter table p1_c1 add constraint inh_check_constraint check (f1 > 0); --error
+select conrelid::regclass, coninhcount, conenforced, convalidated
+from pg_constraint where conname = 'inh_check_constraint'
+order by conrelid::regclass::text collate "C";
+delete from p1_c2;
+alter table p1_c1 add constraint inh_check_constraint check (f1 > 0); --ok
+insert into p1_c2 values(-2); --error
+select conrelid::regclass, coninhcount, conenforced, convalidated
+from pg_constraint where conname = 'inh_check_constraint'
+order by conrelid::regclass::text collate "C";
+drop table p1 cascade;
+
+-- A merge must retain ADD CONSTRAINT's permission checks on descendants.
+create role regress_check_owner;
+create table p1(f1 int);
+create table p1_c1() inherits(p1);
+create table p1_c2() inherits(p1_c1);
+alter table p1 add constraint inh_check_constraint check (f1 > 0) not enforced;
+alter table p1_c1 owner to regress_check_owner;
+set role regress_check_owner;
+alter table p1_c1 add constraint inh_check_constraint check (f1 > 0); --error
+reset role;
+select conrelid::regclass, conislocal, conenforced, convalidated
+from pg_constraint where conname = 'inh_check_constraint'
+order by conrelid::regclass::text collate "C";
+drop table p1 cascade;
+drop role regress_check_owner;
+
+-- NOT VALID promotion skips the initial scan, but propagates enforcement to
+-- all descendants so that new rows are checked everywhere.
+create table p1(f1 int);
+create table p1_c1() inherits(p1);
+create table p1_c2() inherits(p1_c1);
+alter table p1 add constraint inh_check_constraint check (f1 > 0) not enforced;
+insert into p1_c2 values(-1);
+alter table p1_c1 add constraint inh_check_constraint check (f1 > 0) not valid;
+insert into p1_c2 values(-2); --error
+select conrelid::regclass, coninhcount, conenforced, convalidated
+from pg_constraint where conname = 'inh_check_constraint'
+order by conrelid::regclass::text collate "C";
+drop table p1 cascade;
+
+-- A descendant already promoted with NOT VALID must still be scanned when an
+-- ancestor is later promoted as valid.
+create table p1(f1 int);
+create table p1_c1() inherits(p1);
+create table p1_c2() inherits(p1_c1);
+alter table p1 add constraint inh_check_constraint check (f1 > 0) not enforced;
+insert into p1_c2 values(-1);
+alter table p1_c2 add constraint inh_check_constraint check (f1 > 0) not valid;
+alter table p1_c1 add constraint inh_check_constraint check (f1 > 0); --error
+delete from p1_c2;
+alter table p1_c1 add constraint inh_check_constraint check (f1 > 0); --ok
+select conrelid::regclass, coninhcount, conenforced, convalidated
+from pg_constraint where conname = 'inh_check_constraint'
+order by conrelid::regclass::text collate "C";
+drop table p1 cascade;
+
+-- Multiple inherited definitions remain merged while a local promotion scans
+-- the relation.
+create table p1(f1 int);
+create table p1_other(f1 int);
+alter table p1 add constraint inh_check_constraint check (f1 > 0) not enforced;
+alter table p1_other add constraint inh_check_constraint check (f1 > 0) not enforced;
+create table p1_c1() inherits(p1, p1_other);
+insert into p1_c1 values(-1);
+alter table p1_c1 add constraint inh_check_constraint check (f1 > 0); --error
+delete from p1_c1;
+alter table p1_c1 add constraint inh_check_constraint check (f1 > 0); --ok
+select conrelid::regclass, coninhcount, conenforced, convalidated
+from pg_constraint where conname = 'inh_check_constraint'
+order by conrelid::regclass::text collate "C";
+drop table p1, p1_other cascade;
 
 -- an inherited CHECK constraint cannot be NOT ENFORCED under an ENFORCED parent
 create table p1(f1 int constraint p1_a_check check (f1 > 0) enforced);
