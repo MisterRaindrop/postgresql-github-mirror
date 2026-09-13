@@ -416,6 +416,9 @@ static bool ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstrain
 												 Relation conrel, HeapTuple contuple,
 												 bool recurse, bool recursing,
 												 List *changing_conids,
+												 bool skip_validation,
+												 bool force_recurse,
+												 bool force_validation,
 												 LOCKMODE lockmode);
 static bool ATExecAlterConstrDeferrability(List **wqueue, ATAlterConstraint *cmdcon,
 										   Relation conrel, Relation tgrel, Relation rel,
@@ -439,13 +442,16 @@ static void AlterCheckConstrEnforceabilityRecurse(List **wqueue, ATAlterConstrai
 												  Relation conrel, Oid conrelid,
 												  bool recurse, bool recursing,
 												  List *changing_conids,
+												  bool skip_validation,
+												  bool force_validation,
 												  LOCKMODE lockmode);
 static void AlterConstrDeferrabilityRecurse(List **wqueue, ATAlterConstraint *cmdcon,
 											Relation conrel, Relation tgrel, Relation rel,
 											HeapTuple contuple, bool recurse,
 											List **otherrelids, LOCKMODE lockmode);
 static void AlterConstrUpdateConstraintEntry(ATAlterConstraint *cmdcon, Relation conrel,
-											 HeapTuple contuple);
+											 HeapTuple contuple,
+											 bool skip_validation);
 static bool ATCheckCheckConstrHasEnforcedParent(Relation conrel, Relation rel,
 												HeapTuple contuple,
 												List *changing_conids,
@@ -10003,6 +10009,7 @@ ATAddCheckNNConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	ListCell   *lcon;
 	List	   *children;
 	ListCell   *child;
+	Oid			enforcing_conoid = InvalidOid;
 	ObjectAddress address = InvalidObjectAddress;
 
 	/* Guard against stack overflow due to overly deep inheritance tree. */
@@ -10014,14 +10021,49 @@ ATAddCheckNNConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 							ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE);
 
 	/*
+	 * If the command names a check constraint and an identically-named NOT
+	 * ENFORCED check constraint already exists on this relation, then (if
+	 * things go well) AddRelationNewConstraints will merge the new constraint
+	 * into the existing one, additionally marking it enforced. Existing rows
+	 * have never been checked against a NOT ENFORCED constraint, so unlike
+	 * ordinary merges this one requires the existing rows to be verified when
+	 * the new constraint is to be valid.  Take note of the pre-merge state,
+	 * so that we can queue that work below.
+	 */
+	if (constr->contype == CONSTR_CHECK &&
+		constr->conname != NULL &&
+		constr->is_enforced)
+	{
+		Oid			conoid;
+
+		conoid = get_relation_constraint_oid(RelationGetRelid(rel),
+											 constr->conname, true);
+		if (OidIsValid(conoid))
+		{
+			HeapTuple	contup;
+			Form_pg_constraint conform;
+
+			contup = SearchSysCache1(CONSTROID, ObjectIdGetDatum(conoid));
+			if (!HeapTupleIsValid(contup))
+				elog(ERROR, "cache lookup failed for constraint %u", conoid);
+			conform = (Form_pg_constraint) GETSTRUCT(contup);
+			if (conform->contype == CONSTRAINT_CHECK && !conform->conenforced)
+				enforcing_conoid = conoid;
+			ReleaseSysCache(contup);
+		}
+	}
+
+	/*
 	 * Call AddRelationNewConstraints to do the work, making sure it works on
 	 * a copy of the Constraint so transformExpr can't modify the original. It
 	 * returns a list of cooked constraints.
 	 *
 	 * If the constraint ends up getting merged with a pre-existing one, it's
-	 * omitted from the returned list, which is what we want: we do not need
-	 * to do any validation work.  That can only happen at child tables,
-	 * though, since we disallow merging at the top level.
+	 * omitted from the returned list.  Normally there is then no validation
+	 * work to do, but if the merge marked a previously NOT ENFORCED
+	 * constraint as enforced, existing rows must be verified; that case is
+	 * handled below.  Merging can only happen at child tables, though, since
+	 * we disallow merging at the top level.
 	 */
 	newcons = AddRelationNewConstraints(rel, NIL,
 										list_make1(copyObject(constr)),
@@ -10073,6 +10115,64 @@ ATAddCheckNNConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 
 	/* Advance command counter in case same table is visited multiple times */
 	CommandCounterIncrement();
+
+	/*
+	 * If the new constraint was merged into a pre-existing NOT ENFORCED
+	 * constraint, propagate its new enforceability to descendants and queue
+	 * verification of every relation that was not already known valid.  The
+	 * normal add-constraint recursion cannot do this, since a merge returns
+	 * no CookedConstraint and must not increment descendants' coninhcount.
+	 */
+	if (newcons == NIL && OidIsValid(enforcing_conoid))
+	{
+		ATAlterConstraint altercon = {0};
+		Relation	conrel;
+		HeapTuple	contup;
+
+		/*
+		 * The enforceability traversal does not perform the checks made by
+		 * normal ADD CONSTRAINT recursion.  Preserve those checks here,
+		 * including ONLY's restriction on changing inheritable constraints.
+		 */
+		children = find_all_inheritors(RelationGetRelid(rel), lockmode, NULL);
+		foreach_oid(childoid, children)
+		{
+			Relation	childrel;
+
+			if (childoid == RelationGetRelid(rel))
+				continue;
+			if (!recurse)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+						 errmsg("constraint must be added to child tables too")));
+
+			/* find_all_inheritors already got lock */
+			childrel = table_open(childoid, NoLock);
+			CheckAlterTableIsSafe(childrel);
+			ATSimplePermissions(AT_AddConstraint, childrel,
+								ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE);
+			table_close(childrel, NoLock);
+		}
+		list_free(children);
+
+		conrel = table_open(ConstraintRelationId, RowExclusiveLock);
+		contup = SearchSysCache1(CONSTROID, ObjectIdGetDatum(enforcing_conoid));
+		if (!HeapTupleIsValid(contup))
+			elog(ERROR, "cache lookup failed for constraint %u",
+				 enforcing_conoid);
+
+		altercon.conname = constr->conname;
+		altercon.alterEnforceability = true;
+		altercon.is_enforced = true;
+		ATExecAlterCheckConstrEnforceability(wqueue, &altercon, conrel,
+											 contup, recurse, false, NIL,
+											 constr->skip_validation,
+											 true,
+											 constr->initially_valid,
+											 lockmode);
+		ReleaseSysCache(contup);
+		table_close(conrel, RowExclusiveLock);
+	}
 
 	/*
 	 * If the constraint got merged with an existing constraint, we're done.
@@ -12478,7 +12578,8 @@ ATExecAlterConstraintInternal(List **wqueue, ATAlterConstraint *cmdcon,
 		else if (currcon->contype == CONSTRAINT_CHECK)
 			changed = ATExecAlterCheckConstrEnforceability(wqueue, cmdcon, conrel,
 														   contuple, recurse, false,
-														   NIL, lockmode);
+														   NIL, false, false, false,
+														   lockmode);
 	}
 	else if (cmdcon->alterDeferrability &&
 			 ATExecAlterConstrDeferrability(wqueue, cmdcon, conrel, tgrel, rel,
@@ -12550,7 +12651,7 @@ ATExecAlterFKConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 
 	if (currcon->conenforced != cmdcon->is_enforced)
 	{
-		AlterConstrUpdateConstraintEntry(cmdcon, conrel, contuple);
+		AlterConstrUpdateConstraintEntry(cmdcon, conrel, contuple, false);
 		changed = true;
 	}
 
@@ -12660,13 +12761,21 @@ ATExecAlterFKConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 }
 
 /*
- * Returns true if the CHECK constraint's enforceability is altered.
+ * Returns true if the CHECK constraint's enforcement or validation state changes.
+ *
+ * ADD CONSTRAINT uses force_recurse after merging into an inherited constraint:
+ * the merge has already updated the named relation, but its descendants still
+ * need processing.  force_validation also validates descendants that were
+ * already enforced but not yet valid.  skip_validation supports NOT VALID.
  */
 static bool
 ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 									 Relation conrel, HeapTuple contuple,
 									 bool recurse, bool recursing,
 									 List *changing_conids,
+									 bool skip_validation,
+									 bool force_recurse,
+									 bool force_validation,
 									 LOCKMODE lockmode)
 {
 	Form_pg_constraint currcon;
@@ -12728,12 +12837,14 @@ ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 	 * requested enforceability when another matching parent constraint
 	 * remains enforced.
 	 */
-	if (currcon->conenforced != target_enforced)
+	if (currcon->conenforced != target_enforced ||
+		(force_validation && target_enforced && !currcon->convalidated))
 	{
 		ATAlterConstraint updatecon = *cmdcon;
 
 		updatecon.is_enforced = target_enforced;
-		AlterConstrUpdateConstraintEntry(&updatecon, conrel, contuple);
+		AlterConstrUpdateConstraintEntry(&updatecon, conrel, contuple,
+										 skip_validation);
 		changed = true;
 	}
 
@@ -12744,9 +12855,10 @@ ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 	 * unless they still inherit an enforced constraint from another parent.
 	 * Conversely, we should do nothing if a constraint is being set to
 	 * enforced and is already enforced, as descendant constraints cannot be
-	 * different in that case.
+	 * different in that case.  An ADD CONSTRAINT merge has already updated
+	 * the root constraint, so force_recurse overrides that shortcut.
 	 */
-	if (!cmdcon->is_enforced || changed)
+	if (!cmdcon->is_enforced || changed || force_recurse)
 	{
 		/*
 		 * If we're recursing, the parent has already done this, so skip it.
@@ -12814,17 +12926,22 @@ ATExecAlterCheckConstrEnforceability(List **wqueue, ATAlterConstraint *cmdcon,
 			AlterCheckConstrEnforceabilityRecurse(wqueue, cmdcon, conrel,
 												  childoid, false, true,
 												  changing_conids,
+												  skip_validation,
+												  force_validation,
 												  lockmode);
 		}
 	}
 
 	/*
 	 * Tell Phase 3 to check that the constraint is satisfied by existing
-	 * rows. We only need do this when altering the constraint from NOT
-	 * ENFORCED to ENFORCED.
+	 * rows.  Besides newly enforced constraints, an ADD CONSTRAINT merge
+	 * requires validation of its already-updated root and of descendants that
+	 * were already enforced but not yet valid.
 	 */
 	if (rel->rd_rel->relkind == RELKIND_RELATION &&
-		!currcon->conenforced &&
+		(!currcon->conenforced || force_recurse ||
+		 (force_validation && !currcon->convalidated)) &&
+		!skip_validation &&
 		target_enforced)
 	{
 		AlteredTableInfo *tab;
@@ -12866,6 +12983,8 @@ AlterCheckConstrEnforceabilityRecurse(List **wqueue, ATAlterConstraint *cmdcon,
 									  Relation conrel, Oid conrelid,
 									  bool recurse, bool recursing,
 									  List *changing_conids,
+									  bool skip_validation,
+									  bool force_validation,
 									  LOCKMODE lockmode)
 {
 	SysScanDesc pscan;
@@ -12896,6 +13015,8 @@ AlterCheckConstrEnforceabilityRecurse(List **wqueue, ATAlterConstraint *cmdcon,
 
 	ATExecAlterCheckConstrEnforceability(wqueue, cmdcon, conrel, childtup,
 										 recurse, recursing, changing_conids,
+										 skip_validation, false,
+										 force_validation,
 										 lockmode);
 
 	systable_endscan(pscan);
@@ -13065,7 +13186,7 @@ ATExecAlterConstrDeferrability(List **wqueue, ATAlterConstraint *cmdcon,
 	if (currcon->condeferrable != cmdcon->deferrable ||
 		currcon->condeferred != cmdcon->initdeferred)
 	{
-		AlterConstrUpdateConstraintEntry(cmdcon, conrel, contuple);
+		AlterConstrUpdateConstraintEntry(cmdcon, conrel, contuple, false);
 		changed = true;
 
 		/*
@@ -13118,7 +13239,7 @@ ATExecAlterConstrInheritability(List **wqueue, ATAlterConstraint *cmdcon,
 	if (cmdcon->noinherit == currcon->connoinherit)
 		return false;
 
-	AlterConstrUpdateConstraintEntry(cmdcon, conrel, contuple);
+	AlterConstrUpdateConstraintEntry(cmdcon, conrel, contuple, false);
 	CommandCounterIncrement();
 
 	/* Fetch the column number and name */
@@ -13335,7 +13456,7 @@ AlterConstrDeferrabilityRecurse(List **wqueue, ATAlterConstraint *cmdcon,
  */
 static void
 AlterConstrUpdateConstraintEntry(ATAlterConstraint *cmdcon, Relation conrel,
-								 HeapTuple contuple)
+								 HeapTuple contuple, bool skip_validation)
 {
 	HeapTuple	copyTuple;
 	Form_pg_constraint copy_con;
@@ -13354,10 +13475,11 @@ AlterConstrUpdateConstraintEntry(ATAlterConstraint *cmdcon, Relation conrel,
 		 * NB: The convalidated status is irrelevant when the constraint is
 		 * set to NOT ENFORCED, but for consistency, it should still be set
 		 * appropriately. Similarly, if the constraint is later changed to
-		 * ENFORCED, validation will be performed during phase 3, so it makes
-		 * sense to mark it as valid in that case.
+		 * ENFORCED, validation will normally be performed during phase 3. ADD
+		 * CONSTRAINT NOT VALID can instead request that we skip that
+		 * validation and leave the constraint unvalidated.
 		 */
-		copy_con->convalidated = cmdcon->is_enforced;
+		copy_con->convalidated = cmdcon->is_enforced && !skip_validation;
 	}
 	if (cmdcon->alterDeferrability)
 	{
