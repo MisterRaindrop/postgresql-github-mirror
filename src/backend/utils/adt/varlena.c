@@ -35,6 +35,7 @@
 #include "parser/scansup.h"
 #include "port/pg_bswap.h"
 #include "regex/regex.h"
+#include "utils/ascii.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -167,6 +168,7 @@ static void text_format_string_conversion(StringInfo buf, char conversion,
 										  int flags, int width);
 static void text_format_append_string(StringInfo buf, const char *str,
 									  int flags, int width);
+static bool text_is_ascii(text *t);
 
 
 /*****************************************************************************
@@ -5481,6 +5483,39 @@ icu_unicode_version(PG_FUNCTION_ARGS)
 }
 
 /*
+ * Check whether a text value is pure ASCII.
+ *
+ * Pure ASCII (code points 0-127) is unaffected by Unicode normalization
+ * and is always an assigned code point, independent of server encoding,
+ * so callers can use this to skip multibyte decoding entirely. This is
+ * byte-oriented (checking raw bytes for the high bit, rather than
+ * comparing byte length to codepoint count) so it stays correct if ever
+ * reused somewhere the server encoding isn't already known to be UTF8.
+ *
+ * is_valid_ascii() rejects embedded zero bytes as well as high-bit
+ * bytes, and requires its length argument to be a multiple of the SIMD
+ * chunk size (sizeof(Vector8)), so scan the largest chunk-aligned
+ * prefix with it, then apply the same zero-byte/high-bit check
+ * byte-at-a-time to the remainder for consistency.
+ */
+static bool
+text_is_ascii(text *t)
+{
+	unsigned char *s = (unsigned char *) VARDATA_ANY(t);
+	int			len = VARSIZE_ANY_EXHDR(t);
+	int			chunk_len = len - (len % sizeof(Vector8));
+
+	if (chunk_len > 0 && !is_valid_ascii(s, chunk_len))
+		return false;
+
+	for (int i = chunk_len; i < len; i++)
+		if (s[i] == 0 || IS_HIGHBIT_SET(s[i]))
+			return false;
+
+	return true;
+}
+
+/*
  * Check whether the string contains only assigned Unicode code
  * points. Requires that the database encoding is UTF-8.
  */
@@ -5494,6 +5529,10 @@ unicode_assigned(PG_FUNCTION_ARGS)
 	if (GetDatabaseEncoding() != PG_UTF8)
 		ereport(ERROR,
 				(errmsg("Unicode categorization can only be performed if server encoding is UTF8")));
+
+	/* ASCII code points are always assigned */
+	if (text_is_ascii(input))
+		PG_RETURN_BOOL(true);
 
 	/* convert to char32_t */
 	size = pg_mbstrlen_with_len(VARDATA_ANY(input), VARSIZE_ANY_EXHDR(input));
@@ -5526,6 +5565,10 @@ unicode_normalize_func(PG_FUNCTION_ARGS)
 	size_t		i;
 
 	form = unicode_norm_form_from_string(formstr);
+
+	/* ASCII code points are unaffected by normalization */
+	if (text_is_ascii(input))
+		PG_RETURN_TEXT_P(input);
 
 	/* convert to char32_t */
 	size = pg_mbstrlen_with_len(VARDATA_ANY(input), VARSIZE_ANY_EXHDR(input));
@@ -5594,6 +5637,10 @@ unicode_is_normalized(PG_FUNCTION_ARGS)
 	bool		result;
 
 	form = unicode_norm_form_from_string(formstr);
+
+	/* ASCII code points are always normalized, in any of the four forms */
+	if (text_is_ascii(input))
+		PG_RETURN_BOOL(true);
 
 	/* convert to char32_t */
 	size = pg_mbstrlen_with_len(VARDATA_ANY(input), VARSIZE_ANY_EXHDR(input));
