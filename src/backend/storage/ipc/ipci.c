@@ -73,8 +73,9 @@ CalculateShmemSize(void)
 	/* include additional requested shmem from preload libraries */
 	size = add_size(size, total_addin_request);
 
-	/* might as well round it off to a multiple of a typical page size */
-	size = add_size(size, 8192 - (size % 8192));
+	if (size % 8192 != 0)
+		/* might as well round it off to a multiple of a typical page size */
+		size = add_size(size, 8192 - (size % 8192));
 
 	return size;
 }
