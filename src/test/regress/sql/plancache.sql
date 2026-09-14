@@ -228,3 +228,23 @@ select name, generic_plans, custom_plans from pg_prepared_statements
   where  name = 'test_mode_pp';
 
 drop table test_mode;
+
+-- Replacing a cast must invalidate plans that used the old cast function.
+-- Create both functions first so pg_proc invalidation cannot mask the issue.
+create type pc_cast_arg as (v int);
+create function pc_cast_old(pc_cast_arg) returns int
+  language sql immutable strict as 'select ($1).v';
+create function pc_cast_new(pc_cast_arg) returns int
+  language sql immutable strict as 'select ($1).v + 100';
+create cast (pc_cast_arg as int)
+  with function pc_cast_old(pc_cast_arg) as implicit;
+prepare pc_cast_plan(pc_cast_arg) as select $1::int;
+execute pc_cast_plan(row(1)::pc_cast_arg);
+drop cast (pc_cast_arg as int);
+create cast (pc_cast_arg as int)
+  with function pc_cast_new(pc_cast_arg) as implicit;
+execute pc_cast_plan(row(1)::pc_cast_arg);
+deallocate pc_cast_plan;
+drop cast (pc_cast_arg as int);
+drop function pc_cast_old(pc_cast_arg), pc_cast_new(pc_cast_arg);
+drop type pc_cast_arg;
