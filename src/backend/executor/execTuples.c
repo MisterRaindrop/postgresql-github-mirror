@@ -1768,6 +1768,12 @@ ExecForceStoreHeapTuple(HeapTuple tuple,
 		slot->tts_flags |= TTS_FLAG_SHOULDFREE;
 		MemoryContextSwitchTo(oldContext);
 
+		/*
+		 * ExecClearTuple() above reset tts_tid, so restore it from the tuple
+		 * we just stored, the same way the tts_*_store_tuple() callbacks do.
+		 */
+		slot->tts_tid = tuple->t_self;
+
 		if (shouldFree)
 			pfree(tuple);
 	}
