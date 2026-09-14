@@ -95,6 +95,42 @@ is(reloptions($node, 'src', 't_oid8_reset'),
 is(chunk_id_type($node, 'src', 't_oid8_reset'),
 	'oid8', 't_oid8_reset: the reset does not change the TOAST relation');
 
+# Test case 2: reloptions that specify a type.
+#
+# A table created with oid, whose out-of-line values get identifiers to match,
+# and a set of the option that records a request for oid8.
+$node->safe_psql(
+	'src', qq{
+CREATE TABLE t_oid_to_oid8 (id int, val text);
+ALTER TABLE t_oid_to_oid8 ALTER COLUMN val SET STORAGE EXTERNAL;
+INSERT INTO t_oid_to_oid8
+  SELECT g, repeat('b', 5000) FROM generate_series(1, 3) g;
+ALTER TABLE t_oid_to_oid8 SET (toast_value_type = 'oid8');
+});
+
+# The set does not recreate the TOAST relation. The OID counter sits past
+# 2^32, yet an oid identifier still has to fit in one.
+is(chunk_id_type($node, 'src', 't_oid_to_oid8'),
+	'oid', 't_oid_to_oid8: the set does not change the TOAST relation');
+is(chunk_ids_past_oid_max($node, 'src', 't_oid_to_oid8'),
+	'f', 't_oid_to_oid8: chunk identifiers still fit in an oid');
+
+# The same the other way round, a table created with oid8 asking back for oid.
+$node->safe_psql(
+	'src', qq{
+CREATE TABLE t_oid8_to_oid (id int, val text)
+  WITH (toast_value_type = 'oid8');
+ALTER TABLE t_oid8_to_oid ALTER COLUMN val SET STORAGE EXTERNAL;
+INSERT INTO t_oid8_to_oid
+  SELECT g, repeat('c', 5000) FROM generate_series(1, 3) g;
+ALTER TABLE t_oid8_to_oid SET (toast_value_type = 'oid');
+});
+
+is(chunk_id_type($node, 'src', 't_oid8_to_oid'),
+	'oid8', 't_oid8_to_oid: the set does not change the TOAST relation');
+is(chunk_ids_past_oid_max($node, 'src', 't_oid8_to_oid'),
+	't', 't_oid8_to_oid: chunk identifiers do not fit in an oid');
+
 # Dump and restore.
 my $dumpfile = $node->basedir . '/toast_value_type.dump';
 my $textfile = $node->basedir . '/toast_value_type.sql';
@@ -111,6 +147,14 @@ like(
 	$dump,
 	qr/CREATE TABLE public\.t_oid8_reset \(\n[^)]*\)\nWITH \(toast_value_type=oid8\);/,
 	't_oid8_reset: the dump asks for oid8');
+like(
+	$dump,
+	qr/CREATE TABLE public\.t_oid_to_oid8 \(\n[^)]*\)\nWITH \(toast_value_type=oid8\);/,
+	't_oid_to_oid8: the dump asks for oid8');
+like(
+	$dump,
+	qr/CREATE TABLE public\.t_oid8_to_oid \(\n[^)]*\)\nWITH \(toast_value_type=oid\);/,
+	't_oid8_to_oid: the dump asks for oid');
 
 $node->command_ok(
 	[ 'pg_restore', '--dbname' => 'dst', $dumpfile ],
@@ -124,6 +168,40 @@ is( $node->safe_psql(
 		'dst', 'SELECT count(*), min(length(val)) FROM t_oid8_reset'),
 	'3|5000',
 	't_oid8_reset: the out-of-line values are restored intact');
+
+# The restore is what applies the request, and the values come over intact.
+is(chunk_id_type($node, 'dst', 't_oid_to_oid8'),
+	'oid8', 't_oid_to_oid8: the restored TOAST relation uses oid8');
+is(chunk_ids_past_oid_max($node, 'dst', 't_oid_to_oid8'),
+	't',
+	't_oid_to_oid8: the restored chunk identifiers do not fit in an oid');
+is( $node->safe_psql(
+		'dst', 'SELECT count(*), min(length(val)) FROM t_oid_to_oid8'),
+	'3|5000',
+	't_oid_to_oid8: the out-of-line values are restored intact');
+
+# The same value stored again gets an identifier no oid could hold.
+$node->safe_psql('dst',
+	"INSERT INTO t_oid_to_oid8 SELECT 4, repeat('b', 5000)");
+
+is(chunk_ids_past_oid_max($node, 'dst', 't_oid_to_oid8'),
+	't', 't_oid_to_oid8: a new identifier does not fit in an oid');
+
+# The other way round, the restored relation uses oid and so does a new value.
+is(chunk_id_type($node, 'dst', 't_oid8_to_oid'),
+	'oid', 't_oid8_to_oid: the restored TOAST relation uses oid');
+is(chunk_ids_past_oid_max($node, 'dst', 't_oid8_to_oid'),
+	'f', 't_oid8_to_oid: the restored chunk identifiers fit in an oid');
+is( $node->safe_psql(
+		'dst', 'SELECT count(*), min(length(val)) FROM t_oid8_to_oid'),
+	'3|5000',
+	't_oid8_to_oid: the out-of-line values are restored intact');
+
+$node->safe_psql('dst',
+	"INSERT INTO t_oid8_to_oid SELECT 4, repeat('c', 5000)");
+
+is(chunk_ids_past_oid_max($node, 'dst', 't_oid8_to_oid'),
+	'f', 't_oid8_to_oid: a new identifier fits in an oid');
 
 # A binary upgrade dump carries the type in a separate call, not a reloption.
 my $oid8_typoid = $node->safe_psql('src', "SELECT 'oid8'::regtype::oid");
