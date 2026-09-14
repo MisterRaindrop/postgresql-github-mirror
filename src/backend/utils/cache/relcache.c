@@ -138,6 +138,14 @@ typedef struct relidcacheent
 static HTAB *RelationIdCache;
 
 /*
+ * Slab context for all RelationData allocations.
+ *
+ * In large catalogs, aset.c's chunk sizing rules would waste significant
+ * amounts of memory, so a Slab context is used instead.
+ */
+static MemoryContext	RelCacheMemoryContext;
+
+/*
  * This flag is false until we have prepared the critical relcache entries
  * that are needed to do indexscans on the tables read by relcache building.
  */
@@ -421,12 +429,14 @@ AllocateRelationDesc(Form_pg_class relp)
 	Form_pg_class relationForm;
 
 	/* Relcache entries must live in CacheMemoryContext */
-	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
+	oldcxt = MemoryContextSwitchTo(RelCacheMemoryContext);
 
 	/*
 	 * allocate and zero space for new relation descriptor
 	 */
 	relation = palloc0_object(RelationData);
+
+	MemoryContextSwitchTo(CacheMemoryContext);
 
 	/* make sure relation is marked as having no open file yet */
 	relation->rd_smgr = NULL;
@@ -1892,10 +1902,13 @@ formrdesc(const char *relationName, Oid relationReltype,
 	int			i;
 	bool		has_not_null;
 
+	MemoryContextSwitchTo(RelCacheMemoryContext);
 	/*
 	 * allocate new relation desc, clear all fields of reldesc
 	 */
 	relation = palloc0_object(RelationData);
+
+	MemoryContextSwitchTo(CacheMemoryContext);
 
 	/* make sure relation is marked as having no open file yet */
 	relation->rd_smgr = NULL;
@@ -3575,12 +3588,14 @@ RelationBuildLocalRelation(const char *relname,
 	if (!CacheMemoryContext)
 		CreateCacheMemoryContext();
 
-	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
+	oldcxt = MemoryContextSwitchTo(RelCacheMemoryContext);
 
 	/*
 	 * allocate a new relation descriptor and fill in basic state fields.
 	 */
 	rel = palloc0_object(RelationData);
+
+	MemoryContextSwitchTo(CacheMemoryContext);
 
 	/* make sure relation is marked as having no open file yet */
 	rel->rd_smgr = NULL;
@@ -4020,6 +4035,10 @@ RelationCacheInitialize(void)
 	ctl.entrysize = sizeof(RelIdCacheEnt);
 	RelationIdCache = hash_create("Relcache by OID", INITRELCACHESIZE,
 								  &ctl, HASH_ELEM | HASH_BLOBS);
+
+	RelCacheMemoryContext =
+		SlabContextCreate(CacheMemoryContext, "Relation bump cxt",
+						  8192, sizeof(RelationData));
 
 	/*
 	 * reserve enough in_progress_list slots for many cases
@@ -6264,7 +6283,8 @@ load_relcache_init_file(bool shared)
 			rels = repalloc_array(rels, Relation, max_rels);
 		}
 
-		rel = rels[num_rels++] = (Relation) palloc(len);
+		rel = rels[num_rels++] =
+			(Relation) MemoryContextAlloc(RelCacheMemoryContext, len);
 
 		/* then, read the Relation structure */
 		if (fread(rel, 1, len, fp) != len)
