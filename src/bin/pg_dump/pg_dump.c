@@ -7182,6 +7182,7 @@ getTables(Archive *fout, int *numTables)
 	int			i_reloptions;
 	int			i_checkoption;
 	int			i_toastreloptions;
+	int			i_toastvaluetype;
 	int			i_reloftype;
 	int			i_foreignserver;
 	int			i_amname;
@@ -7269,6 +7270,36 @@ getTables(Archive *fout, int *numTables)
 						 "array_remove(array_remove(c.reloptions,'check_option=local'),'check_option=cascaded') AS reloptions, "
 						 "CASE WHEN 'check_option=local' = ANY (c.reloptions) THEN 'LOCAL'::text "
 						 "WHEN 'check_option=cascaded' = ANY (c.reloptions) THEN 'CASCADED'::text ELSE NULL END AS checkoption, ");
+
+	/*
+	 * A reset of toast_value_type removes the entry from the reloptions of a
+	 * relation but leaves its TOAST relation alone, which keeps the chunk_id
+	 * type it was created with. The reloptions then say nothing about the
+	 * type in use, and a WITH clause built from the reloptions alone would
+	 * have the restore create the TOAST relation with the default type
+	 * instead. Report the type of chunk_id for such a relation. Only oid8
+	 * needs to be reported, as a relation using oid matches the default. A
+	 * value present in the reloptions is a request to change the type, and
+	 * takes precedence.
+	 *
+	 * Nothing is reported in binary upgrade mode. There the type is carried
+	 * by binary_upgrade_set_next_toast_chunk_id_typoid and the reloption is
+	 * not read at all, so a WITH clause would only add an entry the
+	 * reloptions of the old cluster do not have.
+	 */
+	if (fout->remoteVersion >= 190000 && !dopt->binary_upgrade)
+		appendPQExpBufferStr(query,
+							 "CASE WHEN (SELECT a.atttypid FROM pg_attribute AS a "
+							 "  WHERE a.attrelid = c.reltoastrelid AND "
+							 "attname = 'chunk_id'::text) = "
+							 CppAsString2(OID8OID) " AND "
+							 "NOT EXISTS (SELECT 1 FROM "
+							 "unnest(coalesce(c.reloptions, '{}')) AS o "
+							 "WHERE split_part(o, '=', 1) = 'toast_value_type') "
+							 "THEN 'oid8' ELSE NULL END AS toast_value_type, ");
+	else
+		appendPQExpBufferStr(query,
+							 "NULL AS toast_value_type, ");
 
 	appendPQExpBufferStr(query,
 						 "am.amname, ");
@@ -7382,6 +7413,7 @@ getTables(Archive *fout, int *numTables)
 	i_reloptions = PQfnumber(res, "reloptions");
 	i_checkoption = PQfnumber(res, "checkoption");
 	i_toastreloptions = PQfnumber(res, "toast_reloptions");
+	i_toastvaluetype = PQfnumber(res, "toast_value_type");
 	i_reloftype = PQfnumber(res, "reloftype");
 	i_foreignserver = PQfnumber(res, "foreignserver");
 	i_amname = PQfnumber(res, "amname");
@@ -7463,6 +7495,10 @@ getTables(Archive *fout, int *numTables)
 		else
 			tblinfo[i].checkoption = pg_strdup(PQgetvalue(res, i, i_checkoption));
 		tblinfo[i].toast_reloptions = pg_strdup(PQgetvalue(res, i, i_toastreloptions));
+		if (PQgetisnull(res, i, i_toastvaluetype))
+			tblinfo[i].toast_value_type = NULL;
+		else
+			tblinfo[i].toast_value_type = pg_strdup(PQgetvalue(res, i, i_toastvaluetype));
 		tblinfo[i].reloftype = atooid(PQgetvalue(res, i, i_reloftype));
 		tblinfo[i].foreign_server = atooid(PQgetvalue(res, i, i_foreignserver));
 		if (PQgetisnull(res, i, i_amname))
@@ -17466,7 +17502,8 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
 		}
 
 		if (nonemptyReloptions(tbinfo->reloptions) ||
-			nonemptyReloptions(tbinfo->toast_reloptions))
+			nonemptyReloptions(tbinfo->toast_reloptions) ||
+			tbinfo->toast_value_type != NULL)
 		{
 			bool		addcomma = false;
 
@@ -17475,6 +17512,14 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
 			{
 				addcomma = true;
 				appendReloptionsArrayAH(q, tbinfo->reloptions, "", fout);
+			}
+			if (tbinfo->toast_value_type != NULL)
+			{
+				if (addcomma)
+					appendPQExpBufferStr(q, ", ");
+				addcomma = true;
+				appendPQExpBuffer(q, "toast_value_type=%s",
+								  tbinfo->toast_value_type);
 			}
 			if (nonemptyReloptions(tbinfo->toast_reloptions))
 			{

@@ -315,6 +315,8 @@ typedef struct _tableInfo
 	char	   *reloptions;		/* options specified by WITH (...) */
 	char	   *checkoption;	/* WITH CHECK OPTION, if any */
 	char	   *toast_reloptions;	/* WITH options for the TOAST table */
+	char	   *toast_value_type;	/* type of chunk_id in the TOAST relation,
+									 * when not implied by reloptions */
 	bool		hasindex;		/* does it have any indexes? */
 	bool		hasrules;		/* does it have any rules? */
 	bool		hastriggers;	/* does it have any triggers? */
