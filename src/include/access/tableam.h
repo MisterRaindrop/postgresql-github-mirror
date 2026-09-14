@@ -1652,6 +1652,19 @@ table_tuple_lock(Relation rel, ItemPointer tid, Snapshot snapshot,
 				 LockWaitPolicy wait_policy, uint8 flags,
 				 TM_FailureData *tmfd)
 {
+	/*
+	 * Reject an invalid TID here rather than letting it reach the AM.  For
+	 * heap that meant handing InvalidBlockNumber to ReadBuffer(), which is
+	 * P_NEW and therefore extends the relation, leaving an uninitialized
+	 * block behind that later breaks sequential scans.  A caller that gets
+	 * this far with an invalid TID has a bug, so fail cleanly instead.
+	 */
+	if (unlikely(!ItemPointerIsValid(tid)))
+		elog(ERROR, "cannot lock tuple with invalid TID (%u,%u) in relation \"%s\"",
+			 ItemPointerGetBlockNumberNoCheck(tid),
+			 ItemPointerGetOffsetNumberNoCheck(tid),
+			 RelationGetRelationName(rel));
+
 	return rel->rd_tableam->tuple_lock(rel, tid, snapshot, slot,
 									   cid, mode, wait_policy,
 									   flags, tmfd);
