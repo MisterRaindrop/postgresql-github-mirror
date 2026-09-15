@@ -35,6 +35,7 @@
 #include "parser/scansup.h"
 #include "port/pg_bswap.h"
 #include "regex/regex.h"
+#include "utils/ascii.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -167,6 +168,7 @@ static void text_format_string_conversion(StringInfo buf, char conversion,
 										  int flags, int width);
 static void text_format_append_string(StringInfo buf, const char *str,
 									  int flags, int width);
+static int	text_ascii_check(text *t);
 
 
 /*****************************************************************************
@@ -5481,6 +5483,44 @@ icu_unicode_version(PG_FUNCTION_ARGS)
 }
 
 /*
+ * Check whether a text value is pure ASCII.
+ *
+ * Return -1 if it is, otherwise the zero-based byte offset of the first
+ * failing SIMD chunk, or the failing byte in the scalar remainder.  All
+ * bytes before the returned offset are known to be nonzero ASCII.
+ *
+ * Pure ASCII (code points 0-127) is unaffected by Unicode normalization
+ * and is always an assigned code point, independent of server encoding,
+ * so callers can use this to skip multibyte decoding entirely. This is
+ * byte-oriented (checking raw bytes for the high bit, rather than
+ * comparing byte length to codepoint count) so it stays correct if ever
+ * reused somewhere the server encoding isn't already known to be UTF8.
+ *
+ * is_valid_ascii() rejects embedded zero bytes as well as high-bit
+ * bytes, and requires its length argument to be a multiple of the SIMD
+ * chunk size (sizeof(Vector8)), so check one chunk at a time to locate
+ * the first failure, then apply the same zero-byte/high-bit check
+ * byte-at-a-time to the remainder for consistency.
+ */
+static int
+text_ascii_check(text *t)
+{
+	unsigned char *s = (unsigned char *) VARDATA_ANY(t);
+	int			len = VARSIZE_ANY_EXHDR(t);
+	int			chunk_len = len - (len % sizeof(Vector8));
+
+	for (int i = 0; i < chunk_len; i += sizeof(Vector8))
+		if (!is_valid_ascii(s + i, sizeof(Vector8)))
+			return i;
+
+	for (int i = chunk_len; i < len; i++)
+		if (s[i] == 0 || IS_HIGHBIT_SET(s[i]))
+			return i;
+
+	return -1;
+}
+
+/*
  * Check whether the string contains only assigned Unicode code
  * points. Requires that the database encoding is UTF-8.
  */
@@ -5490,14 +5530,21 @@ unicode_assigned(PG_FUNCTION_ARGS)
 	text	   *input = PG_GETARG_TEXT_PP(0);
 	unsigned char *p;
 	int			size;
+	int			start;
 
 	if (GetDatabaseEncoding() != PG_UTF8)
 		ereport(ERROR,
 				(errmsg("Unicode categorization can only be performed if server encoding is UTF8")));
 
-	/* convert to char32_t */
-	size = pg_mbstrlen_with_len(VARDATA_ANY(input), VARSIZE_ANY_EXHDR(input));
-	p = (unsigned char *) VARDATA_ANY(input);
+	/* ASCII code points are always assigned */
+	start = text_ascii_check(input);
+	if (start == -1)
+		PG_RETURN_BOOL(true);
+
+	/* Convert only the suffix not already known to be ASCII to char32_t. */
+	size = pg_mbstrlen_with_len(VARDATA_ANY(input) + start,
+								VARSIZE_ANY_EXHDR(input) - start);
+	p = (unsigned char *) VARDATA_ANY(input) + start;
 	for (int i = 0; i < size; i++)
 	{
 		char32_t	uchar = utf8_to_unicode(p);
@@ -5524,13 +5571,28 @@ unicode_normalize_func(PG_FUNCTION_ARGS)
 	unsigned char *p;
 	text	   *result;
 	size_t		i;
+	int			start;
 
 	form = unicode_norm_form_from_string(formstr);
 
-	/* convert to char32_t */
-	size = pg_mbstrlen_with_len(VARDATA_ANY(input), VARSIZE_ANY_EXHDR(input));
+	/* ASCII code points are unaffected by normalization */
+	start = text_ascii_check(input);
+	if (start == -1)
+		PG_RETURN_TEXT_P(input);
+
+	/*
+	 * Keep the last ASCII character in the suffix, since a following
+	 * combining mark could compose with it.  ASCII characters have combining
+	 * class zero, so normalization cannot affect any earlier characters.
+	 */
+	if (start > 0)
+		start--;
+
+	/* convert the suffix to char32_t */
+	size = pg_mbstrlen_with_len(VARDATA_ANY(input) + start,
+								VARSIZE_ANY_EXHDR(input) - start);
 	input_chars = palloc_array(char32_t, size + 1);
-	p = (unsigned char *) VARDATA_ANY(input);
+	p = (unsigned char *) VARDATA_ANY(input) + start;
 	for (i = 0; i < size; i++)
 	{
 		input_chars[i] = utf8_to_unicode(p);
@@ -5543,7 +5605,7 @@ unicode_normalize_func(PG_FUNCTION_ARGS)
 	output_chars = unicode_normalize(form, input_chars);
 
 	/* convert back to UTF-8 string */
-	size = 0;
+	size = start;
 	for (char32_t *wp = output_chars; *wp; wp++)
 	{
 		unsigned char buf[4];
@@ -5556,6 +5618,8 @@ unicode_normalize_func(PG_FUNCTION_ARGS)
 	SET_VARSIZE(result, size + VARHDRSZ);
 
 	p = (unsigned char *) VARDATA_ANY(result);
+	memcpy(p, VARDATA_ANY(input), start);
+	p += start;
 	for (char32_t *wp = output_chars; *wp; wp++)
 	{
 		unicode_to_utf8(*wp, p);
@@ -5592,13 +5656,27 @@ unicode_is_normalized(PG_FUNCTION_ARGS)
 	UnicodeNormalizationQC quickcheck;
 	size_t		output_size;
 	bool		result;
+	int			start;
 
 	form = unicode_norm_form_from_string(formstr);
 
-	/* convert to char32_t */
-	size = pg_mbstrlen_with_len(VARDATA_ANY(input), VARSIZE_ANY_EXHDR(input));
+	/* ASCII code points are always normalized, in any of the four forms */
+	start = text_ascii_check(input);
+	if (start == -1)
+		PG_RETURN_BOOL(true);
+
+	/*
+	 * Include the preceding ASCII character for possible composition with a
+	 * following combining mark, as in unicode_normalize_func().
+	 */
+	if (start > 0)
+		start--;
+
+	/* convert the suffix to char32_t */
+	size = pg_mbstrlen_with_len(VARDATA_ANY(input) + start,
+								VARSIZE_ANY_EXHDR(input) - start);
 	input_chars = palloc_array(char32_t, size + 1);
-	p = (unsigned char *) VARDATA_ANY(input);
+	p = (unsigned char *) VARDATA_ANY(input) + start;
 	for (i = 0; i < size; i++)
 	{
 		input_chars[i] = utf8_to_unicode(p);
