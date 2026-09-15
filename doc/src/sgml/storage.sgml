@@ -590,6 +590,71 @@ tuple would otherwise be too big.
 
 </sect2>
 
+<sect2 id="storage-toast-chunk-id-type">
+ <title>Changing the <structfield>chunk_id</structfield> Type of a TOAST Relation</title>
+
+<para>
+To change the <structfield>chunk_id</structfield> type of an existing table to
+<type>oid8</type>, set
+<link linkend="reloption-toast-value-type"><literal>toast_value_type</literal></link>
+and then dump and restore the table:
+<programlisting>
+ALTER TABLE mytable SET (toast_value_type = 'oid8');
+</programlisting>
+<programlisting>
+pg_dump -Fc -t mytable mydb &gt; mytable.dump
+pg_restore -d mynewdb mytable.dump
+</programlisting>
+The <command>ALTER TABLE</command> only records the new value, which is
+consulted when a <acronym>TOAST</acronym> relation is created. The restore is
+what creates one and therefore applies it, so it has to be the command that
+creates the table. Restoring over a table that still exists leaves its
+<acronym>TOAST</acronym> relation alone, so drop the original first when
+changing a table in place.
+</para>
+
+<para>
+A table that has no <acronym>TOAST</acronym> relation yet takes no dump and
+restore, as the value recorded now is applied when a wide column added later
+causes one to be created.
+</para>
+
+<para>
+A table rewrite such as <command>CLUSTER</command>,
+<command>REPACK</command> or <command>VACUUM FULL</command> preserves the
+type already in use, and so does a <application>pg_upgrade</application>,
+which carries the existing <acronym>TOAST</acronym> relation over to the new
+cluster. The only way to recreate the <acronym>TOAST</acronym> relation of a
+table is to dump and restore it.
+</para>
+
+<para>
+The type in use by the <acronym>TOAST</acronym> relation of a table can be
+checked with:
+<programlisting>
+SELECT a.atttypid::regtype
+  FROM pg_class c, pg_attribute a
+  WHERE c.oid = 'mytable'::regclass AND
+        a.attrelid = c.reltoastrelid AND a.attname = 'chunk_id';
+</programlisting>
+</para>
+
+<note>
+<para>
+To change the <structfield>chunk_id</structfield> type of a table back to
+<type>oid</type>, set <literal>toast_value_type</literal> to
+<literal>oid</literal> and then dump and restore the table the same way. The
+chunk identifiers are assigned afresh during the restore, so the ones that did
+not fit in an <type>oid</type> are replaced by ones that do, and no error or
+warning is reported. Such a table is however limited again to 2^32
+out-of-line values, and as the OID space fills up, finding an OID that is
+still free when inserting into the <acronym>TOAST</acronym> relation can
+become expensive. The server log reports <quote>still searching for an unused
+OID in relation</quote> when that happens.
+</para>
+</note>
+</sect2>
+
 </sect1>
 
 <sect1 id="storage-fsm">
