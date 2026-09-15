@@ -17,6 +17,7 @@
 #include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/table.h"
+#include "access/xact.h"
 #include "catalog/pg_opfamily.h"
 #include "commands/defrem.h"
 #include "commands/explain_format.h"
@@ -52,6 +53,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/resowner.h"
 #include "utils/sampling.h"
 #include "utils/selfuncs.h"
 #include "utils/timestamp.h"
@@ -5767,8 +5769,45 @@ postgresImportForeignStatistics(Relation relation, List *va_cols, int elevel)
 								 &remstats, &remattrmap, &attrcnt);
 
 	if (ok)
-		ok = import_fetched_statistics(relation, schemaname, relname,
-									   &remstats, remattrmap, attrcnt);
+	{
+		MemoryContext oldcontext = CurrentMemoryContext;
+		ResourceOwner oldowner = CurrentResourceOwner;
+
+		/*
+		 * Import the fetched statistics atomically.  An attribute conversion
+		 * failure is reported by returning false, after possibly updating
+		 * that attribute and any preceding attributes.  Roll those changes
+		 * back so they cannot leak into the sampling fallback.
+		 */
+		BeginInternalSubTransaction(NULL);
+		MemoryContextSwitchTo(oldcontext);
+
+		PG_TRY();
+		{
+			ok = import_fetched_statistics(relation, schemaname, relname,
+										   &remstats, remattrmap, attrcnt);
+
+			if (ok)
+				ReleaseCurrentSubTransaction();
+			else
+				RollbackAndReleaseCurrentSubTransaction();
+			MemoryContextSwitchTo(oldcontext);
+			CurrentResourceOwner = oldowner;
+		}
+		PG_CATCH();
+		{
+			ErrorData  *edata;
+
+			MemoryContextSwitchTo(oldcontext);
+			edata = CopyErrorData();
+			FlushErrorState();
+			RollbackAndReleaseCurrentSubTransaction();
+			MemoryContextSwitchTo(oldcontext);
+			CurrentResourceOwner = oldowner;
+			ReThrowError(edata);
+		}
+		PG_END_TRY();
+	}
 
 	if (ok)
 	{
