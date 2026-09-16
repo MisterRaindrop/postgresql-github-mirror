@@ -125,6 +125,14 @@ teardown
 
 session s2
 
+# By now the one index of repack_toast has been built on the new heap, so
+# index_rebuild_count must be 1: the index built must be counted, and the
+# TOAST index of the new heap must not leave anything behind.
+step s2_progress
+{
+	SELECT phase, index_rebuild_count FROM pg_stat_progress_repack;
+}
+
 # Test different kinds of toast data changes.
 step s2_updates
 {
@@ -174,6 +182,7 @@ step s2_wakeup_before_lock
 # CONCURRENTLY find their way into the table.
 permutation
 	s1_wait_before_lock
+	s2_progress
 	s2_updates
 	s2_check
 	s2_wakeup_before_lock
