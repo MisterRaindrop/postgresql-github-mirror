@@ -111,3 +111,43 @@ FOR EACH ROW EXECUTE PROCEDURE tied_modify();
 INSERT INTO tied_trigger_test (i, v) VALUES (1, 'orig');
 
 SELECT i, v FROM tied_trigger_test;
+
+-- die from FETCH after the sub returns (no user-level eval context).
+-- Without an eval around conversion this used to exit the backend.
+CREATE FUNCTION tied_array_fetch_die() RETURNS int[] AS $$
+	package TiedArrayFetchDie;
+	sub TIEARRAY  { bless [], $_[0] }
+	sub FETCHSIZE { 1 }
+	sub FETCH     { die 'tied array FETCH died' }
+	my @a;
+	tie @a, 'TiedArrayFetchDie';
+	return \@a;
+$$ LANGUAGE plperl;
+
+SELECT tied_array_fetch_die();
+
+CREATE FUNCTION tied_array_no_fetch() RETURNS int[] AS $$
+	package TiedArrayNoFetch;
+	sub TIEARRAY  { bless [], $_[0] }
+	sub FETCHSIZE { 1 }
+	my @a;
+	tie @a, 'TiedArrayNoFetch';
+	return \@a;
+$$ LANGUAGE plperl;
+
+SELECT tied_array_no_fetch();
+
+CREATE FUNCTION tied_hash_firstkey_die() RETURNS tiedrowperl AS $$
+	package TiedHashFirstkeyDie;
+	sub TIEHASH  { bless {}, $_[0] }
+	sub STORE    { $_[0]{$_[1]} = $_[2] }
+	sub FIRSTKEY { die 'tied hash FIRSTKEY died' }
+	sub NEXTKEY  { each %{$_[0]} }
+	sub FETCH    { $_[0]{$_[1]} }
+	my %h;
+	tie %h, 'TiedHashFirstkeyDie';
+	$h{f1} = 1;
+	return \%h;
+$$ LANGUAGE plperl;
+
+SELECT tied_hash_firstkey_die();

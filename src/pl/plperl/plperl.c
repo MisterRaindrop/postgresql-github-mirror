@@ -88,6 +88,7 @@ typedef struct plperl_interp_desc
 	Oid			user_id;		/* Hash key (must be first!) */
 	PerlInterpreter *interp;	/* The interpreter */
 	HTAB	   *query_hash;		/* plperl_query_entry structs */
+	CV		   *eval_cv;		/* _eval, called with G_EVAL */
 } plperl_interp_desc;
 
 
@@ -181,7 +182,28 @@ typedef struct plperl_call_data
 	Oid			cdomain_oid;	/* 0 unless returning domain-over-composite */
 	void	   *cdomain_info;
 	MemoryContext tmp_cxt;
+	/* Conversion of the Perl result, run inside the _eval XSUB */
+	Datum		(*eval_fn) (void *arg);
+	void	   *eval_arg;
+	Datum		eval_result;	/* G_VOID XSUB has no Datum return */
 } plperl_call_data;
+
+/* Argument of plperl_convert_func_result. */
+typedef struct
+{
+	plperl_proc_desc *prodesc;
+	FunctionCallInfo fcinfo;
+	ReturnSetInfo *rsi;			/* fcinfo->resultinfo, may be NULL */
+	SV		   *perlret;
+}			plperl_convert_func_arg;
+
+/* Argument of plperl_convert_trigger_result. */
+typedef struct
+{
+	FunctionCallInfo fcinfo;
+	SV		   *perlret;
+	HV		   *hvTD;			/* $_TD, used if the trigger returns MODIFY */
+}			plperl_convert_trig_arg;
 
 /**********************************************************************
  * The information we cache about prepared and saved plans
@@ -300,6 +322,10 @@ static void plperl_inline_callback(void *arg);
 static char *strip_trailing_ws(const char *msg);
 static OP  *pp_require_safe(pTHX);
 static void activate_interpreter(plperl_interp_desc *interp_desc);
+static void plperl_xs_eval(pTHX_ CV *cv);
+static Datum plperl_run_under_eval(Datum (*fn) (void *arg), void *arg);
+static Datum plperl_convert_func_result(void *arg);
+static Datum plperl_convert_trigger_result(void *arg);
 
 #if defined(WIN32) && PERL_VERSION_LT(5, 28, 0)
 static char *setlocale_perl(int category, char *locale);
@@ -522,6 +548,7 @@ select_perl_context(bool trusted)
 		/* Initialize newly-created hashtable entry */
 		interp_desc->interp = NULL;
 		interp_desc->query_hash = NULL;
+		interp_desc->eval_cv = NULL;
 	}
 
 	/* Make sure we have a query_hash for this interpreter */
@@ -616,6 +643,10 @@ select_perl_context(bool trusted)
 					(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
 					 errmsg("%s", strip_trailing_ws(sv2cstr(ERRSV))),
 					 errcontext("while executing PostgreSQL::InServer::SPI::bootstrap")));
+
+		interp_desc->eval_cv =
+			newXS("PostgreSQL::InServer::_eval",
+				  plperl_xs_eval, __FILE__);
 	}
 
 	/* Fully initialized, so mark the hashtable entry valid */
@@ -2396,6 +2427,7 @@ plperl_func_handler(PG_FUNCTION_ARGS)
 	Datum		retval = 0;
 	ReturnSetInfo *rsi;
 	ErrorContextCallback pl_error_context;
+	plperl_convert_func_arg carg;
 
 	nonatomic = fcinfo->context &&
 		IsA(fcinfo->context, CallContext) &&
@@ -2442,61 +2474,11 @@ plperl_func_handler(PG_FUNCTION_ARGS)
 	if (SPI_finish() != SPI_OK_FINISH)
 		elog(ERROR, "SPI_finish() failed");
 
-	if (prodesc->fn_retisset)
-	{
-		dTHX;
-		SV		   *sav;
-
-		/*
-		 * If the Perl function returned an arrayref, we pretend that it
-		 * called return_next() for each element of the array, to handle old
-		 * SRFs that didn't know about return_next(). Any other sort of return
-		 * value is an error, except undef which means return an empty set.
-		 */
-		plperl_materialize_sv(perlret);
-		sav = get_perl_array_ref(perlret);
-		if (sav)
-		{
-			AV		   *rav = (AV *) SvRV(sav);
-			Size_t		alen = av_count(rav);
-
-			for (Size_t i = 0; i < alen; i++)
-			{
-				SV		  **svp = av_fetch(rav, i, FALSE);
-
-				if (svp)
-					plperl_return_next_internal(*svp);
-			}
-		}
-		else if (perlret && SvOK(perlret))
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_DATATYPE_MISMATCH),
-					 errmsg("set-returning PL/Perl function must return "
-							"reference to array or use return_next")));
-		}
-
-		rsi->returnMode = SFRM_Materialize;
-		if (current_call_data->tuple_store)
-		{
-			rsi->setResult = current_call_data->tuple_store;
-			rsi->setDesc = current_call_data->ret_tdesc;
-		}
-		retval = (Datum) 0;
-	}
-	else if (prodesc->result_oid)
-	{
-		retval = plperl_sv_to_datum(perlret,
-									prodesc->result_oid,
-									-1,
-									fcinfo,
-									&prodesc->result_in_func,
-									prodesc->result_typioparam,
-									&fcinfo->isnull);
-
-		if (fcinfo->isnull && rsi && IsA(rsi, ReturnSetInfo))
-			rsi->isDone = ExprEndResult;
-	}
+	carg.prodesc = prodesc;
+	carg.fcinfo = fcinfo;
+	carg.rsi = rsi;
+	carg.perlret = perlret;
+	retval = plperl_run_under_eval(plperl_convert_func_result, &carg);
 
 	/* Restore the previous error callback */
 	error_context_stack = pl_error_context.previous;
@@ -2519,6 +2501,7 @@ plperl_trigger_handler(PG_FUNCTION_ARGS)
 	ErrorContextCallback pl_error_context;
 	TriggerData *tdata;
 	int			rc PG_USED_FOR_ASSERTS_ONLY;
+	plperl_convert_trig_arg carg;
 
 	/* Connect to SPI manager */
 	SPI_connect();
@@ -2554,62 +2537,10 @@ plperl_trigger_handler(PG_FUNCTION_ARGS)
 	if (SPI_finish() != SPI_OK_FINISH)
 		elog(ERROR, "SPI_finish() failed");
 
-	plperl_materialize_sv(perlret);
-
-	if (perlret == NULL || !SvOK(perlret))
-	{
-		/* undef result means go ahead with original tuple */
-		TriggerData *trigdata = ((TriggerData *) fcinfo->context);
-
-		if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
-			retval = PointerGetDatum(trigdata->tg_trigtuple);
-		else if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
-			retval = PointerGetDatum(trigdata->tg_newtuple);
-		else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
-			retval = PointerGetDatum(trigdata->tg_trigtuple);
-		else if (TRIGGER_FIRED_BY_TRUNCATE(trigdata->tg_event))
-			retval = PointerGetDatum(trigdata->tg_trigtuple);
-		else
-			retval = (Datum) 0; /* can this happen? */
-	}
-	else
-	{
-		HeapTuple	trv;
-		char	   *tmp;
-
-		tmp = sv2cstr(perlret);
-
-		if (pg_strcasecmp(tmp, "SKIP") == 0)
-			trv = NULL;
-		else if (pg_strcasecmp(tmp, "MODIFY") == 0)
-		{
-			TriggerData *trigdata = (TriggerData *) fcinfo->context;
-
-			if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
-				trv = plperl_modify_tuple(hvTD, trigdata,
-										  trigdata->tg_trigtuple);
-			else if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
-				trv = plperl_modify_tuple(hvTD, trigdata,
-										  trigdata->tg_newtuple);
-			else
-			{
-				ereport(WARNING,
-						(errcode(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
-						 errmsg("ignoring modified row in DELETE trigger")));
-				trv = NULL;
-			}
-		}
-		else
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
-					 errmsg("result of PL/Perl trigger function must be undef, "
-							"\"SKIP\", or \"MODIFY\"")));
-			trv = NULL;
-		}
-		retval = PointerGetDatum(trv);
-		pfree(tmp);
-	}
+	carg.fcinfo = fcinfo;
+	carg.perlret = perlret;
+	carg.hvTD = hvTD;
+	retval = plperl_run_under_eval(plperl_convert_trigger_result, &carg);
 
 	/* Restore the previous error callback */
 	error_context_stack = pl_error_context.previous;
@@ -2657,6 +2588,283 @@ plperl_event_trigger_handler(PG_FUNCTION_ARGS)
 	SvREFCNT_dec_current(svTD);
 }
 
+/*
+ * Called from plperl_run_under_eval via call_sv(G_EVAL).  Runs eval_fn.
+ * Postgres ERROR becomes croak_cstr, matching SPI.
+ */
+static void
+plperl_xs_eval(pTHX_ CV *cv)
+{
+	SV		  **mark;
+	MemoryContext oldcontext = CurrentMemoryContext;
+
+	(void) cv;
+
+	/*
+	 * PUSHMARK stored an offset from PL_stack_base, not a pointer.
+	 * Peek at the mark so call_sv still has it after we return.
+	 */
+	mark = PL_stack_base + *PL_markstack_ptr;
+
+	if (current_call_data == NULL || current_call_data->eval_fn == NULL)
+		Perl_croak(aTHX_ "PL/Perl eval invoked out of context");
+
+	PG_TRY();
+	{
+		current_call_data->eval_result =
+			current_call_data->eval_fn(current_call_data->eval_arg);
+	}
+	PG_CATCH();
+	{
+		ErrorData  *edata;
+
+		MemoryContextSwitchTo(oldcontext);
+		edata = CopyErrorData();
+		FlushErrorState();
+		croak_cstr(edata->message);
+	}
+	PG_END_TRY();
+
+	PL_stack_sp = mark;			/* G_VOID: no Perl results */
+}
+
+/*
+ * The user's PL/Perl sub is invoked with call_sv(G_EVAL).  A die
+ * inside the sub becomes ERRSV.  After that returns we convert the
+ * result in C.  av_fetch, hv_iternext, and SvGETMAGIC can run Perl
+ * FETCH.  There is no eval frame left, so croak is uncaught and Perl
+ * exits the backend.  This function runs the conversion through an
+ * XSUB with G_EVAL so croak becomes ERRSV and we report ERROR.
+ *
+ * The call sequence is:
+ *
+ * +----------------------------+
+ * | plperl_run_under_eval      |
+ * +-------------+--------------+
+ *               |
+ *               v
+ * +----------------------------+
+ * | call_sv(G_VOID | G_EVAL)   |
+ * +-------------+--------------+
+ *               |
+ *               v
+ * +----------------------------+
+ * | plperl_xs_eval             |
+ * | PG_TRY { fn(arg) }         |
+ * | PG_CATCH { croak_cstr }    |
+ * +----------------------------+
+ */
+static Datum
+plperl_run_under_eval(Datum (*fn) (void *arg), void *arg)
+{
+	dTHX;
+	dSP;
+	sigjmp_buf *save_ex = PG_exception_stack;
+	ErrorContextCallback *save_ctx = error_context_stack;
+	int			count;
+
+	Assert(current_call_data != NULL);
+
+	/*
+	 * Already inside the XSUB.  Call fn here rather than nesting
+	 * another call_sv.
+	 */
+	if (current_call_data->eval_fn != NULL)
+		return fn(arg);
+
+	if (plperl_active_interp == NULL || plperl_active_interp->eval_cv == NULL)
+		elog(ERROR, "PL/Perl eval is not initialized");
+
+	/*
+	 * call_sv cannot pass a C function pointer.  The XSUB reads fn and
+	 * arg from current_call_data.  Clear eval_fn after call_sv so a Perl
+	 * call to _eval is rejected as out of context.
+	 */
+	current_call_data->eval_fn = fn;
+	current_call_data->eval_arg = arg;
+	current_call_data->eval_result = (Datum) 0;
+
+	ENTER;
+	SAVETMPS;
+	PUSHMARK(SP);
+	PUTBACK;
+	/*
+	 * G_EVAL puts a Perl eval frame on the cx stack so croak from
+	 * conversion becomes ERRSV.  G_VOID because the XSUB returns nothing.
+	 */
+	count = call_sv((SV *) plperl_active_interp->eval_cv, G_VOID | G_EVAL);
+	(void) count;
+	SPAGAIN;
+	PUTBACK;
+	FREETMPS;
+	LEAVE;
+
+	current_call_data->eval_fn = NULL;
+	current_call_data->eval_arg = NULL;
+
+	/*
+	 * croak longjmps to call_sv.  The XSUB does not return, so PG_TRY
+	 * never restores PG_exception_stack or error_context_stack.
+	 */
+	PG_exception_stack = save_ex;
+	error_context_stack = save_ctx;
+
+	if (SvTRUE(ERRSV))
+		ereport(ERROR,
+				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+				 errmsg("%s", strip_trailing_ws(sv2cstr(ERRSV)))));
+
+	return current_call_data->eval_result;
+}
+
+/*
+ * Convert a PL/Perl function result after SPI_finish.  Called via
+ * plperl_run_under_eval so croak from conversion is caught.
+ */
+static Datum
+plperl_convert_func_result(void *arg)
+{
+	plperl_convert_func_arg *carg = (plperl_convert_func_arg *) arg;
+	plperl_proc_desc *prodesc = carg->prodesc;
+	FunctionCallInfo fcinfo = carg->fcinfo;
+	ReturnSetInfo *rsi = carg->rsi;
+	SV		   *perlret = carg->perlret;
+
+	if (prodesc->fn_retisset)
+	{
+		dTHX;
+		SV		   *sav;
+
+		/*
+		 * If the Perl function returned an arrayref, we pretend that it
+		 * called return_next() for each element of the array, to handle old
+		 * SRFs that didn't know about return_next(). Any other sort of return
+		 * value is an error, except undef which means return an empty set.
+		 */
+		plperl_materialize_sv(perlret);
+		sav = get_perl_array_ref(perlret);
+		if (sav)
+		{
+			AV		   *rav = (AV *) SvRV(sav);
+			Size_t		alen = av_count(rav);
+
+			for (Size_t i = 0; i < alen; i++)
+			{
+				SV		  **svp = av_fetch(rav, i, FALSE);
+
+				if (svp)
+					plperl_return_next_internal(*svp);
+			}
+		}
+		else if (perlret && SvOK(perlret))
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("set-returning PL/Perl function must return "
+							"reference to array or use return_next")));
+		}
+
+		rsi->returnMode = SFRM_Materialize;
+		if (current_call_data->tuple_store)
+		{
+			rsi->setResult = current_call_data->tuple_store;
+			rsi->setDesc = current_call_data->ret_tdesc;
+		}
+		return (Datum) 0;
+	}
+
+	if (prodesc->result_oid)
+	{
+		Datum		retval;
+
+		retval = plperl_sv_to_datum(perlret,
+									prodesc->result_oid,
+									-1,
+									fcinfo,
+									&prodesc->result_in_func,
+									prodesc->result_typioparam,
+									&fcinfo->isnull);
+
+		if (fcinfo->isnull && rsi && IsA(rsi, ReturnSetInfo))
+			rsi->isDone = ExprEndResult;
+		return retval;
+	}
+
+	return (Datum) 0;
+}
+
+/*
+ * Convert a PL/Perl trigger result after SPI_finish.  Called via
+ * plperl_run_under_eval so croak from conversion is caught.
+ */
+static Datum
+plperl_convert_trigger_result(void *arg)
+{
+	dTHX;
+	plperl_convert_trig_arg *carg = (plperl_convert_trig_arg *) arg;
+	SV		   *perlret = carg->perlret;
+	HV		   *hvTD = carg->hvTD;
+	Datum		retval;
+
+	plperl_materialize_sv(perlret);
+
+	if (perlret == NULL || !SvOK(perlret))
+	{
+		/* undef result means go ahead with original tuple */
+		TriggerData *trigdata = ((TriggerData *) carg->fcinfo->context);
+
+		if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
+			retval = PointerGetDatum(trigdata->tg_trigtuple);
+		else if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+			retval = PointerGetDatum(trigdata->tg_newtuple);
+		else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
+			retval = PointerGetDatum(trigdata->tg_trigtuple);
+		else if (TRIGGER_FIRED_BY_TRUNCATE(trigdata->tg_event))
+			retval = PointerGetDatum(trigdata->tg_trigtuple);
+		else
+			retval = (Datum) 0;	/* can this happen? */
+	}
+	else
+	{
+		HeapTuple	trv;
+		char	   *tmp;
+
+		tmp = sv2cstr(perlret);
+
+		if (pg_strcasecmp(tmp, "SKIP") == 0)
+			trv = NULL;
+		else if (pg_strcasecmp(tmp, "MODIFY") == 0)
+		{
+			TriggerData *trigdata = (TriggerData *) carg->fcinfo->context;
+
+			if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
+				trv = plperl_modify_tuple(hvTD, trigdata,
+										  trigdata->tg_trigtuple);
+			else if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+				trv = plperl_modify_tuple(hvTD, trigdata,
+										  trigdata->tg_newtuple);
+			else
+			{
+				ereport(WARNING,
+						(errcode(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
+						 errmsg("ignoring modified row in DELETE trigger")));
+				trv = NULL;
+			}
+		}
+		else
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
+					 errmsg("result of PL/Perl trigger function must be undef, "
+							"\"SKIP\", or \"MODIFY\"")));
+			trv = NULL;
+		}
+		retval = PointerGetDatum(trv);
+		pfree(tmp);
+	}
+
+	return retval;
+}
 
 static bool
 validate_plperl_function(plperl_proc_ptr *proc_ptr, HeapTuple procTup)
