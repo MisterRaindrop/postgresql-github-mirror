@@ -497,6 +497,13 @@ typedef struct RecursiveUnion
 
 	/* estimated number of groups in input */
 	Cardinality numGroups;
+
+	/* sort keys for replacement (for subset DISTINCT ON with ORDER BY) */
+	int			numSortCols;
+	AttrNumber *sortColIdx pg_node_attr(array_size(numSortCols));
+	Oid		   *sortOperators pg_node_attr(array_size(numSortCols));
+	Oid		   *sortCollations pg_node_attr(array_size(numSortCols));
+	bool	   *sortNullsFirst pg_node_attr(array_size(numSortCols));
 } RecursiveUnion;
 
 /* ----------------
@@ -1243,6 +1250,13 @@ typedef struct Agg
 
 	/* grouping sets to use */
 	List	   *groupingSets;
+
+	/* sort keys for inline DISTINCT ON ORDER BY (if any) */
+	int			numSortCols;
+	AttrNumber *sortColIdx pg_node_attr(array_size(numSortCols));
+	Oid		   *sortOperators pg_node_attr(array_size(numSortCols));
+	Oid		   *sortCollations pg_node_attr(array_size(numSortCols));
+	bool	   *sortNullsFirst pg_node_attr(array_size(numSortCols));
 
 	/* chained Agg/Sort nodes */
 	List	   *chain;

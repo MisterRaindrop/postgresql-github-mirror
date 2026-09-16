@@ -67,6 +67,6 @@ extern List *BuildOnConflictExcludedTargetlist(Relation targetrel,
 extern SortGroupClause *makeSortGroupClauseForSetOp(Oid rescoltype, bool require_hash);
 extern void constructSetOpTargetlist(ParseState *pstate, SetOperationStmt *op,
 									 const List *ltargetlist, const List *rtargetlist,
-									 List **targetlist, const char *context, bool recursive);
+									 List **targetlist, const char *context, bool recursive, List *distinctClause);
 
 #endif							/* ANALYZE_H */

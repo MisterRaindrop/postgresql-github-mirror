@@ -752,7 +752,7 @@ generate_setop_from_pathqueries(List *pathqueries, List **rtable, List **targetl
 	sostmt->all = true;
 	sostmt->larg = (Node *) lrtr;
 	sostmt->rarg = rarg;
-	constructSetOpTargetlist(NULL, sostmt, lquery->targetList, rtargetlist, targetlist, "UNION", false);
+	constructSetOpTargetlist(NULL, sostmt, lquery->targetList, rtargetlist, targetlist, "UNION", false, NIL);
 
 	return (Node *) sostmt;
 }
