@@ -1592,6 +1592,36 @@ CacheInvalidateHeapTupleInplace(Relation relation,
 }
 
 /*
+ * CacheInvalidateProcCandidates
+ *		Register an invalidation event for cached function resolution results.
+ *
+ * Cached analyzed queries record the function, procedure or aggregate that
+ * name resolution selected, but resolution also depends on the set of pg_proc
+ * candidates visible under the active search_path.  Adding a candidate, moving
+ * one to a different name or schema, or changing which call shapes an existing
+ * one can match, can all make fresh parse analysis of unchanged SQL select a
+ * different object, without modifying the previously selected one.  Callers
+ * that make such a change must call this, so that cached queries get
+ * reanalyzed.
+ *
+ * There is nothing object-specific to report here, since the affected queries
+ * need not mention any particular function, so we send a broad invalidation of
+ * just the PROCNAMEARGSNSP syscache.  That is deliberately not
+ * CacheInvalidateCatalog(ProcedureRelationId), which would flush every pg_proc
+ * catalog cache in every backend; those cached tuples remain valid, only
+ * results derived from them during parse analysis do not.
+ */
+void
+CacheInvalidateProcCandidates(void)
+{
+	if (IsBootstrapProcessingMode())
+		return;
+
+	RegisterCatcacheInvalidation(PROCNAMEARGSNSP, 0, MyDatabaseId,
+								 PrepareInvalidationState());
+}
+
+/*
  * CacheInvalidateCatalog
  *		Register invalidation of the whole content of a system catalog.
  *

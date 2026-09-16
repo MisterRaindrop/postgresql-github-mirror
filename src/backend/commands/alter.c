@@ -62,6 +62,7 @@
 #include "storage/lmgr.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
@@ -346,6 +347,16 @@ AlterObjectRename_internal(Relation rel, Oid objectId, const char *new_name)
 		 * Instead, we invalidate only the relsyncache.
 		 */
 		InvalidatePubRelSyncCache(pub->oid, pub->puballtables);
+	}
+	else if (classId == ProcedureRelationId)
+	{
+		/*
+		 * Renaming a callable object changes the candidate sets of both the
+		 * old and the new name, so previously analyzed SQL may now resolve
+		 * differently.  Its OID does not change, so the plan cache's
+		 * dependencies on the previously selected function would not notice.
+		 */
+		CacheInvalidateProcCandidates();
 	}
 
 	/* Release memory */
@@ -808,6 +819,14 @@ AlterObjectNamespace_internal(Relation rel, Oid objid, Oid nspOid)
 
 	/* Perform actual update */
 	CatalogTupleUpdate(rel, &tup->t_self, newtup);
+
+	/*
+	 * Moving a callable object to another schema changes which names it is
+	 * visible under, and with what search_path precedence; compare the rename
+	 * case in AlterObjectRename_internal.
+	 */
+	if (classId == ProcedureRelationId)
+		CacheInvalidateProcCandidates();
 
 	/* Release memory */
 	pfree(values);

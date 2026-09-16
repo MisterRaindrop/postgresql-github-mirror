@@ -39,6 +39,7 @@
 #include "tcop/tcopprot.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/regproc.h"
 #include "utils/rel.h"
@@ -141,6 +142,8 @@ ProcedureCreate(const char *procedureName,
 	NameData	procname;
 	TupleDesc	tupDesc;
 	bool		is_update;
+	int16		old_pronargdefaults = 0;
+	Oid			old_provariadic = InvalidOid;
 	ObjectAddress myself,
 				referenced,
 				temp_object;
@@ -398,6 +401,10 @@ ProcedureCreate(const char *procedureName,
 		bool		isnull;
 		const char *dropcmd;
 
+		/* Remember the columns that determine candidate applicability */
+		old_pronargdefaults = oldproc->pronargdefaults;
+		old_provariadic = oldproc->provariadic;
+
 		if (!replace)
 			ereport(ERROR,
 					(errcode(ERRCODE_DUPLICATE_FUNCTION),
@@ -613,6 +620,31 @@ ProcedureCreate(const char *procedureName,
 
 
 	retval = ((Form_pg_proc) GETSTRUCT(tup))->oid;
+
+	/*
+	 * If we created a new callable object, or changed which call shapes an
+	 * existing one can match, function name resolution may now come out
+	 * differently for SQL that was analyzed earlier.  Both parameter defaults
+	 * and VARIADIC affect the argument lists that FuncnameGetCandidates
+	 * synthesizes for a candidate, so a change to either one matters even
+	 * though the object's OID and signature stay the same.
+	 *
+	 * proname, proargtypes and pronamespace cannot change here: we located
+	 * oldtup by an exact match on those columns, so altering any of them
+	 * creates a different object instead.  Other in-place changes, such as the
+	 * body or the volatility, cannot affect any candidate set, and plancache.c
+	 * tracks them precisely by way of the selected function's OID.
+	 */
+	if (!is_update)
+		CacheInvalidateProcCandidates();
+	else
+	{
+		Form_pg_proc newproc = (Form_pg_proc) GETSTRUCT(tup);
+
+		if (newproc->pronargdefaults != old_pronargdefaults ||
+			newproc->provariadic != old_provariadic)
+			CacheInvalidateProcCandidates();
+	}
 
 	/*
 	 * Create dependencies for the new function.  If we are updating an
