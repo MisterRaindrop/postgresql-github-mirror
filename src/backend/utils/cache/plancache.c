@@ -36,7 +36,13 @@
  * certain other system catalogs, such as pg_namespace; but for them, our
  * response is just to invalidate all plans.  We expect updates on those
  * catalogs to be infrequent enough that more-detailed tracking is not worth
- * the effort.  We likewise watch pg_authid, pg_auth_members, and
+ * the effort.  Function name resolution needs special treatment: it depends on
+ * the whole set of pg_proc candidates visible under the active search_path,
+ * not only on the function that resolution selected, so the pg_proc
+ * dependencies described above cannot detect a change to it.  Catalog changes
+ * that can move a candidate set send a separate broad invalidation instead
+ * (see CacheInvalidateProcCandidates), and we respond by invalidating all
+ * plans.  We likewise watch pg_authid, pg_auth_members, and
  * pg_database, which can change which row-level security policies apply.
  * Since those are shared catalogs whose inval events reach every backend
  * in the cluster, we invalidate only the role-dependent plans.
@@ -116,6 +122,9 @@ static void PlanCacheRoleCallback(Datum arg, SysCacheIdentifier cacheid,
 								  uint32 hashvalue);
 static void PlanCacheSysCallback(Datum arg, SysCacheIdentifier cacheid,
 								 uint32 hashvalue);
+static void PlanCacheProcCandidateCallback(Datum arg,
+										   SysCacheIdentifier cacheid,
+										   uint32 hashvalue);
 
 /* ResourceOwner callbacks to track plancache references */
 static void ResOwnerReleaseCachedPlan(Datum res);
@@ -155,6 +164,8 @@ InitPlanCache(void)
 {
 	CacheRegisterRelcacheCallback(PlanCacheRelCallback, (Datum) 0);
 	CacheRegisterSyscacheCallback(PROCOID, PlanCacheObjectCallback, (Datum) 0);
+	CacheRegisterSyscacheCallback(PROCNAMEARGSNSP,
+								  PlanCacheProcCandidateCallback, (Datum) 0);
 	CacheRegisterSyscacheCallback(TYPEOID, PlanCacheObjectCallback, (Datum) 0);
 	CacheRegisterSyscacheCallback(NAMESPACEOID, PlanCacheSysCallback, (Datum) 0);
 	CacheRegisterSyscacheCallback(OPEROID, PlanCacheSysCallback, (Datum) 0);
@@ -2366,6 +2377,38 @@ PlanCacheRoleCallback(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
 			plansource->gplan->is_valid = false;
 		}
 	}
+}
+
+/*
+ * PlanCacheProcCandidateCallback
+ *		Syscache inval callback function for PROCNAMEARGSNSP cache
+ *
+ * Cached queries record the function that name resolution selected, but
+ * resolution also depends on the whole set of pg_proc candidates visible under
+ * the active search_path (see FuncnameGetCandidates and func_get_detail).
+ * That dependency can't be expressed as a PlanInvalItem: a candidate added
+ * after parse analysis can't be named by a dependency recorded before it
+ * existed, and the selected function may not be recorded at all, since
+ * record_plan_function_dependency ignores built-in functions.
+ *
+ * Invalidations of individual pg_proc tuples are reported here too, because
+ * catcache invalidation follows tuple changes rather than key changes, but
+ * those represent body or property updates that cannot move any candidate
+ * set; PlanCacheObjectCallback already handles them precisely by way of
+ * PROCOID, so ignore them.  A whole-cache invalidation, reported with
+ * hashvalue zero, does mean that resolution might now come out differently,
+ * so discard all cached query trees to force reanalysis.
+ * CacheInvalidateProcCandidates sends one for exactly that reason, but it is
+ * not the only source: other whole-cache resets, such as recovery from sinval
+ * queue overflow, also arrive this way, and reanalyzing more than strictly
+ * necessary then is harmless.
+ */
+static void
+PlanCacheProcCandidateCallback(Datum arg, SysCacheIdentifier cacheid,
+							   uint32 hashvalue)
+{
+	if (hashvalue == 0)
+		ResetPlanCache();
 }
 
 /*

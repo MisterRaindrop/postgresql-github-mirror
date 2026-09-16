@@ -228,3 +228,48 @@ select name, generic_plans, custom_plans from pg_prepared_statements
   where  name = 'test_mode_pp';
 
 drop table test_mode;
+
+-- Cached queries record the function that name resolution selected, but
+-- resolution also depends on the set of visible pg_proc candidates, so a
+-- change to that set must force reanalysis.
+
+-- A candidate added to the same schema can outrank the one already selected.
+create schema pc_ov;
+set search_path = pc_ov, pg_catalog;
+create function pc_f(bigint) returns text
+  language sql as $$ select 'bigint' $$;
+prepare pc_q as select pc_f(1);
+execute pc_q;
+create function pc_f(int) returns text language sql as $$ select 'int' $$;
+execute pc_q;
+
+-- A candidate added to an earlier schema of an unchanged search_path shadows
+-- the one already selected.  Both schemas exist before the PREPARE, so this
+-- is not masked by a search_path change or by pg_namespace invalidation.
+create schema pc_s1;
+create schema pc_s2;
+set search_path = pc_s2, pc_s1, pg_catalog;
+create function pc_s1.pc_g(int) returns text language sql as $$ select 's1' $$;
+prepare pc_q2(int) as select pc_g($1);
+execute pc_q2(1);
+create function pc_s2.pc_g(int) returns text language sql as $$ select 's2' $$;
+execute pc_q2(1);
+
+-- Giving an existing function a parameter default changes which call arities
+-- it is a candidate for, although its OID and signature do not change.
+set search_path = pc_ov, pg_catalog;
+create function pc_h(int) returns text language sql as $$ select 'h1' $$;
+create function pc_h(int, int) returns text language sql as $$ select 'h2' $$;
+prepare pc_q3 as select pc_h(1);
+execute pc_q3;
+create or replace function pc_h(int, int default 0) returns text
+  language sql as $$ select 'h2' $$;
+execute pc_q3;
+
+deallocate pc_q;
+deallocate pc_q2;
+deallocate pc_q3;
+drop function pc_f(bigint), pc_f(int), pc_h(int), pc_h(int, int);
+drop function pc_s1.pc_g(int), pc_s2.pc_g(int);
+reset search_path;
+drop schema pc_ov, pc_s1, pc_s2;

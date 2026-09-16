@@ -67,6 +67,8 @@ extern void CacheInvalidateHeapTupleInplace(Relation relation,
 
 extern void CacheInvalidateCatalog(Oid catalogId);
 
+extern void CacheInvalidateProcCandidates(void);
+
 extern void CacheInvalidateRelcache(Relation relation);
 
 extern void CacheInvalidateRelcacheAll(void);
