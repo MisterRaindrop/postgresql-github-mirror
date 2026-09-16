@@ -35,20 +35,21 @@ SERVERS := server-cn-and-alt-names \
 	server-no-names \
 	server-revoked
 CLIENTS := client client-dn client-revoked client_ext client-long \
-	client-revoked-utf8
+	client-revoked-utf8 client-uri client-uri-multi
 
 #
 # To add a new non-standard certificate, add it to SPECIAL_CERTS and then add
 # a recipe for creating it to the "Special-case certificates" section below.
 #
-SPECIAL_CERTS := ssl/server-rsapss.crt
+SPECIAL_CERTS := ssl/server-rsapss.crt ssl/client-uri-nosubject.crt
 
 # Likewise for non-standard keys
 SPECIAL_KEYS := ssl/server-password.key \
 	ssl/client-der.key \
 	ssl/client-encrypted-pem.key \
 	ssl/client-encrypted-der.key \
-	ssl/server-rsapss.key
+	ssl/server-rsapss.key \
+	ssl/client-uri-nosubject.key
 
 #
 # These files are just concatenations of other files. You can add new ones to
@@ -115,6 +116,11 @@ ssl/server-password.key: ssl/server-cn-only.key
 # Key that uses the RSA-PSS algorithm
 ssl/server-rsapss.key:
 	$(OPENSSL) genpkey -algorithm rsa-pss -out $@
+
+# Key for the client certificate with an empty subject (client-uri-nosubject)
+ssl/client-uri-nosubject.key:
+	$(OPENSSL) genrsa -out $@ 2048
+	chmod 0600 $@
 
 # DER-encoded version of client.key
 ssl/client-der.key: ssl/client.key
@@ -196,8 +202,16 @@ $(SERVER_CERTS): ssl/%.crt: ssl/%.csr conf/%.config conf/cas.config ssl/server_c
 $(CLIENT_CERTS): ssl/%.crt: ssl/%.csr conf/%.config conf/cas.config ssl/client_ca.crt | ssl/new_certs_dir $(client_ca_state_files)
 	$(OPENSSL) ca -batch -config conf/cas.config -name client_ca -notext -in $< -out $@
 
+# Client certificate with an empty subject and a single, critical URI
+# subjectAltName.  Unlike the standard client certificates, this needs
+# an explicit "-subj /" when generating the CSR, since the config file
+# alone cannot express an empty subject.
+ssl/client-uri-nosubject.crt: ssl/client-uri-nosubject.key conf/client-uri-nosubject.config conf/cas.config ssl/client_ca.crt | ssl/new_certs_dir $(client_ca_state_files)
+	$(OPENSSL) req -new -utf8 -key $< -subj / -out ssl/client-uri-nosubject.csr -config conf/client-uri-nosubject.config
+	$(OPENSSL) ca -batch -config conf/cas.config -name client_ca -notext -in ssl/client-uri-nosubject.csr -out $@
+
 # The CSRs don't need to persist after a build.
-.INTERMEDIATE: $(CERTIFICATES:%=ssl/%.csr)
+.INTERMEDIATE: $(CERTIFICATES:%=ssl/%.csr) ssl/client-uri-nosubject.csr
 ssl/%.csr: ssl/%.key conf/%.config
 	$(OPENSSL) req -new -utf8 -key $< -out $@ -config conf/$*.config
 

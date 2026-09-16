@@ -2746,11 +2746,26 @@ CheckCertAuth(Port *port)
 			break;
 		case clientCertCN:
 			peer_username = port->peer_cn;
+			break;
+		case clientCertURI:
+			/*
+			 * The SPIFFE X.509-SVID specification requires an SVID to carry
+			 * exactly one URI SAN, so refuse both none and more than one: the
+			 * authenticated identity must be unambiguous.
+			 */
+			if (port->peer_uri_count != 1)
+			{
+				ereport(LOG,
+						(errmsg("certificate authentication failed for user \"%s\": client certificate must contain exactly one URI subject alternative name",
+								port->user_name)));
+				return STATUS_ERROR;
+			}
+			peer_username = port->peer_uri;
+			break;
 	}
 
 	/* Make sure we have received a username in the certificate */
-	if (peer_username == NULL ||
-		strlen(peer_username) <= 0)
+	if (peer_username == NULL || strlen(peer_username) <= 0)
 	{
 		ereport(LOG,
 				(errmsg("certificate authentication failed for user \"%s\": client certificate contains no user name",
@@ -2761,29 +2776,39 @@ CheckCertAuth(Port *port)
 	if (port->hba->auth_method == uaCert)
 	{
 		/*
-		 * For cert auth, the client's Subject DN is always our authenticated
-		 * identity, even if we're only using its CN for authorization.  Set
-		 * it now, rather than waiting for check_usermap() below, because
-		 * authentication has already succeeded and we want the log file to
-		 * reflect that.
+		 * For cert auth, the client's Subject DN is our authenticated
+		 * identity, except when clientname=URI, in which case the URI SAN is
+		 * the authenticated identity.  Set it now, rather than waiting for
+		 * check_usermap() below, because authentication has already succeeded
+		 * and we want the log file to reflect that.
 		 */
-		if (!port->peer_dn)
+		if (port->hba->clientcertname == clientCertURI)
+			set_authn_id(port, peer_username);
+		else
 		{
-			/*
-			 * This should not happen as both peer_dn and peer_cn should be
-			 * set in this context.
-			 */
-			ereport(LOG,
-					(errmsg("certificate authentication failed for user \"%s\": unable to retrieve subject DN",
-							port->user_name)));
-			return STATUS_ERROR;
-		}
+			if (!port->peer_dn)
+			{
+				/*
+				 * This should not happen as both peer_dn and peer_cn should
+				 * be set in this context, unless the certificate has an empty
+				 * subject (which is allowed when a URI SAN is present, but
+				 * not here, since we're not matching on the URI).
+				 */
+				ereport(LOG,
+						(errmsg("certificate authentication failed for user \"%s\": unable to retrieve subject DN",
+								port->user_name)));
+				return STATUS_ERROR;
+			}
 
-		set_authn_id(port, port->peer_dn);
+			set_authn_id(port, port->peer_dn);
+		}
 	}
 
-	/* Just pass the certificate cn/dn to the usermap check */
-	status_check_usermap = check_usermap(port->hba->usermap, port->user_name, peer_username, false);
+	/* Just pass the certificate cn/dn/uri to the usermap check */
+	status_check_usermap = check_usermap(port->hba->usermap,
+										 port->user_name,
+										 peer_username,
+										 false);
 	if (status_check_usermap != STATUS_OK)
 	{
 		/*
@@ -2804,6 +2829,12 @@ CheckCertAuth(Port *port)
 					ereport(LOG,
 							(errmsg("certificate validation (clientcert=verify-full) failed for user \"%s\": CN mismatch",
 									port->user_name)));
+					break;
+				case clientCertURI:
+					ereport(LOG,
+							(errmsg("certificate validation (clientcert=verify-full) failed for user \"%s\": URI SAN mismatch",
+									port->user_name)));
+					break;
 			}
 		}
 	}

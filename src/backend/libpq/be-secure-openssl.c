@@ -106,6 +106,7 @@ static int	sni_clienthello_cb(SSL *ssl, int *al, void *arg);
 #endif
 
 static char *X509_NAME_to_cstring(const X509_NAME *name);
+static char *X509_URI_to_cstring(const ASN1_STRING *uri);
 
 static SSL_CTX *SSL_context = NULL;
 static MemoryContext SSL_hosts_memcxt = NULL;
@@ -1072,9 +1073,14 @@ aloop:
 	/* Get client certificate, if available. */
 	port->peer = SSL_get_peer_certificate(port->ssl);
 
-	/* and extract the Common Name and Distinguished Name from it. */
+	/*
+	 * and extract the Common Name, Distinguished Name, and Subject Alternate
+	 * Name from it.
+	 */
 	port->peer_cn = NULL;
 	port->peer_dn = NULL;
+	port->peer_uri = NULL;
+	port->peer_uri_count = 0;
 	port->peer_cert_valid = false;
 	if (port->peer != NULL)
 	{
@@ -1084,6 +1090,8 @@ aloop:
 		BIO		   *bio = NULL;
 		BUF_MEM    *bio_buf = NULL;
 		int			index;
+
+		STACK_OF(GENERAL_NAME) * peer_san;
 
 		index = X509_NAME_get_index_by_NID(unconstify(X509_NAME *, x509name), NID_commonName, -1);
 		if (index >= 0)
@@ -1137,7 +1145,7 @@ aloop:
 		 * it prints the Subject fields in reverse order.
 		 */
 		if (X509_NAME_print_ex(bio, x509name, 0, XN_FLAG_RFC2253) == -1 ||
-			BIO_get_mem_ptr(bio, &bio_buf) <= 0)
+			BIO_get_mem_ptr(bio, &bio_buf) < 0)
 		{
 			BIO_free(bio);
 			if (port->peer_cn != NULL)
@@ -1147,26 +1155,74 @@ aloop:
 			}
 			return -1;
 		}
-		peer_dn = MemoryContextAlloc(TopMemoryContext, bio_buf->length + 1);
-		memcpy(peer_dn, bio_buf->data, bio_buf->length);
 		len = bio_buf->length;
-		BIO_free(bio);
-		peer_dn[len] = '\0';
-		if (len != strlen(peer_dn))
+		if (len > 0)
 		{
-			ereport(COMMERROR,
-					(errcode(ERRCODE_PROTOCOL_VIOLATION),
-					 errmsg("SSL certificate's distinguished name contains embedded null")));
-			pfree(peer_dn);
-			if (port->peer_cn != NULL)
+			peer_dn = MemoryContextAlloc(TopMemoryContext, len + 1);
+			memcpy(peer_dn, bio_buf->data, len);
+			BIO_free(bio);
+			peer_dn[len] = '\0';
+			if (len != strlen(peer_dn))
 			{
-				pfree(port->peer_cn);
-				port->peer_cn = NULL;
+				ereport(COMMERROR,
+						(errcode(ERRCODE_PROTOCOL_VIOLATION),
+						 errmsg("SSL certificate's distinguished name contains embedded null")));
+				pfree(peer_dn);
+				if (port->peer_cn != NULL)
+				{
+					pfree(port->peer_cn);
+					port->peer_cn = NULL;
+				}
+				return -1;
 			}
-			return -1;
+
+			port->peer_dn = peer_dn;
+		}
+		else
+		{
+			/*
+			 * An empty subject means there is no DN to record, so leave
+			 * peer_dn NULL.  The X.509-SVID specification allows this when a
+			 * (critical) URI subjectAltName is present.
+			 * clientname=CN or clientname=DN authentication will reject such
+			 * a certificate later in CheckCertAuth(), since there is no name to compare.
+			 */
+			BIO_free(bio);
 		}
 
-		port->peer_dn = peer_dn;
+		peer_san = (STACK_OF(GENERAL_NAME) *) X509_get_ext_d2i(port->peer, NID_subject_alt_name, NULL, NULL);
+
+		if (peer_san)
+		{
+			int			san_len = sk_GENERAL_NAME_num(peer_san);
+			int			i;
+
+			/*
+			 * Count the URI subjectAltNames directly in peer_uri_count and
+			 * keep the first one.  Only one URI is ever accepted (see
+			 * CheckCertAuth()), so later URIs are never used as an identity;
+			 * the count alone is enough to reject certificates with more than
+			 * one.
+			 */
+			for (i = 0; i < san_len; i++)
+			{
+				const GENERAL_NAME *name = sk_GENERAL_NAME_value(peer_san, i);
+
+				if (name->type == GEN_URI &&
+					port->peer_uri_count++ == 0)
+					port->peer_uri = X509_URI_to_cstring(name->d.uniformResourceIdentifier);
+			}
+
+			/*
+			 * If a URI was present but could not be converted (e.g. embedded
+			 * NUL), fail closed: reset the count so the certificate is
+			 * rejected.
+			 */
+			if (port->peer_uri_count > 0 && port->peer_uri == NULL)
+				port->peer_uri_count = 0;
+
+			sk_GENERAL_NAME_pop_free(peer_san, GENERAL_NAME_free);
+		}
 
 		port->peer_cert_valid = true;
 	}
@@ -1201,6 +1257,13 @@ be_tls_close(Port *port)
 	{
 		pfree(port->peer_dn);
 		port->peer_dn = NULL;
+	}
+
+	if (port->peer_uri)
+	{
+		pfree(port->peer_uri);
+		port->peer_uri = NULL;
+		port->peer_uri_count = 0;
 	}
 }
 
@@ -2429,6 +2492,46 @@ X509_NAME_to_cstring(const X509_NAME *name)
 		pfree(dp);
 	if (BIO_free(membuf) != 1)
 		elog(ERROR, "could not free OpenSSL BIO structure");
+
+	return result;
+}
+
+/*
+ * Convert an X509 URI subjectAltName to a cstring.
+ */
+static char *
+X509_URI_to_cstring(const ASN1_STRING *uri)
+{
+	int			len;
+	const unsigned char *data;
+	char	   *result;
+
+	if (uri == NULL)
+	{
+		ereport(COMMERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("SSL certificate's URI subject alternative name is invalid")));
+		return NULL;
+	}
+
+	len = ASN1_STRING_length(uri);
+	data = ASN1_STRING_get0_data(uri);
+	result = MemoryContextAlloc(TopMemoryContext, len + 1);
+	memcpy(result, data, len);
+	result[len] = '\0';
+
+	/*
+	 * Reject embedded NULLs in certificate URI SANs to prevent confusion
+	 * between PostgreSQL's cstring handling and the certificate contents.
+	 */
+	if (len != strlen(result))
+	{
+		pfree(result);
+		ereport(COMMERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("SSL certificate's URI subject alternative name contains embedded null")));
+		return NULL;
+	}
 
 	return result;
 }
