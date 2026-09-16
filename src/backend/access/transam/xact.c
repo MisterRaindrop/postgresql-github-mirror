@@ -65,6 +65,7 @@
 #include "utils/builtins.h"
 #include "utils/combocid.h"
 #include "utils/guc.h"
+#include "utils/injection_point.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/relmapper.h"
@@ -2404,6 +2405,16 @@ CommitTransaction(void)
 		 * durably commit.
 		 */
 		latestXid = RecordTransactionCommit();
+
+		/*
+		 * Testing hook for the window in which the commit record has already
+		 * been written (and flushed, if synchronous_commit is on), but the
+		 * PGPROC entry has not been cleaned yet and shared invalidations have
+		 * not been sent.  Only fire when a commit record was actually
+		 * written, so that read-only transactions don't get stuck here.
+		 */
+		if (TransactionIdIsValid(latestXid))
+			INJECTION_POINT("xact-commit-after-record", NULL);
 	}
 	else
 	{
