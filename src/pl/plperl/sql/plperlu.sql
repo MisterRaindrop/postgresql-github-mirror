@@ -15,3 +15,16 @@ DO $$ warn $_SHARED{init} $$ language plperlu;
 CREATE OR REPLACE FUNCTION perl_unicode_regex(text) RETURNS INTEGER AS $$
   return ($_[0] =~ /\x{263A}|happy/i) ? 1 : 0; # unicode smiley
 $$ LANGUAGE plperlu;
+
+-- croak from overload stringify after the sub returns.
+CREATE TABLE overload_trig_test ();
+
+CREATE FUNCTION overload_trig_stringify_die() RETURNS trigger AS $$
+	use overload '""' => sub { die 'overload stringify died' };
+	bless {};
+$$ LANGUAGE plperlu;
+
+CREATE TRIGGER overload_trig_stringify_die_trig BEFORE INSERT ON overload_trig_test
+EXECUTE PROCEDURE overload_trig_stringify_die();
+
+INSERT INTO overload_trig_test DEFAULT VALUES;
