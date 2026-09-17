@@ -2081,6 +2081,10 @@ parse_hba_auth_opt(char *name, char *val, HbaLine *hbaline,
 		{
 			hbaline->clientcertname = clientCertDN;
 		}
+		else if (strcmp(val, "URI") == 0)
+		{
+			hbaline->clientcertname = clientCertURI;
+		}
 		else
 		{
 			ereport(elevel,
@@ -2834,7 +2838,6 @@ check_usermap(const char *usermap_name,
 	}
 	return found_entry ? STATUS_OK : STATUS_ERROR;
 }
-
 
 /*
  * Read the ident config file and create a List of IdentLine records for
