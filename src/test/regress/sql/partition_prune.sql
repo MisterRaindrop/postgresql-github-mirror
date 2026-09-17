@@ -212,6 +212,58 @@ explain (costs off) select count(*) from mc2bp where c1 > 7;
 
 drop table mc2bp;
 
+-- Ensure the default partition is not pruned when a bound is unbounded only
+-- in a trailing key
+create table mc2pdmax (a int, b int) partition by range (a, b);
+create table mc2pdmax_default partition of mc2pdmax default;
+create table mc2pdmax1 partition of mc2pdmax for values from (13, 0) to (19, maxvalue);
+insert into mc2pdmax values (32, 5);
+
+explain (costs off) select * from mc2pdmax where a = 32 and b >= -7;
+select * from mc2pdmax where a = 32 and b >= -7;
+explain (costs off) select * from mc2pdmax where a >= 25 and b >= 0;
+select * from mc2pdmax where a >= 25 and b >= 0;
+
+-- The same lookup value reaches the key space above the bound here but not in
+-- the a = 19 case below, so the default partition must be scanned for the
+-- first query only.
+insert into mc2pdmax values (19, 5);
+select * from mc2pdmax where a >= 19 and b >= 5;
+select * from mc2pdmax where a = 19 and b >= 5;
+
+-- With the prefix pinned to the bound's first key, nothing carrying that
+-- prefix can sort above (19, maxvalue), so the default partition is not needed
+explain (costs off) select * from mc2pdmax where a = 19 and b >= 5;
+explain (costs off) select * from mc2pdmax where a >= 19 and b >= 5;
+drop table mc2pdmax;
+
+create table mc2pdmin (a int, b int) partition by range (a, b);
+create table mc2pdmin_default partition of mc2pdmin default;
+create table mc2pdmin1 partition of mc2pdmin for values from (13, minvalue) to (19, 5);
+insert into mc2pdmin values (5, 5);
+
+explain (costs off) select * from mc2pdmin where a = 5 and b <= 7;
+select * from mc2pdmin where a = 5 and b <= 7;
+drop table mc2pdmin;
+
+-- Ensure the default partition is still pruned when the first key is unbounded
+create table mc2pinf (a int, b int) partition by range (a, b);
+create table mc2pinf_default partition of mc2pinf default;
+create table mc2pinf1 partition of mc2pinf for values from (0, 0) to (maxvalue, maxvalue);
+create table mc2pinf2 partition of mc2pinf for values from (minvalue, minvalue) to (0, 0);
+
+explain (costs off) select * from mc2pinf where a = 32 and b >= -7;
+explain (costs off) select * from mc2pinf where a = -32 and b <= 7;
+drop table mc2pinf;
+
+-- Ensure the uncovered key space matches nothing when there is no default
+create table mc2pnodef (a int, b int) partition by range (a, b);
+create table mc2pnodef1 partition of mc2pnodef for values from (13, 0) to (19, maxvalue);
+
+explain (costs off) select * from mc2pnodef where a = 32 and b >= -7;
+explain (costs off) select * from mc2pnodef where a = 15 and b >= 0;
+drop table mc2pnodef;
+
 -- boolean partitioning
 create table boolpart (a bool) partition by list (a);
 create table boolpart_default partition of boolpart default;

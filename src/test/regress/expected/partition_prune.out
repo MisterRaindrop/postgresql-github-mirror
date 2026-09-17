@@ -1132,6 +1132,132 @@ explain (costs off) select count(*) from mc2bp where c1 > 7;
 (3 rows)
 
 drop table mc2bp;
+-- Ensure the default partition is not pruned when a bound is unbounded only
+-- in a trailing key
+create table mc2pdmax (a int, b int) partition by range (a, b);
+create table mc2pdmax_default partition of mc2pdmax default;
+create table mc2pdmax1 partition of mc2pdmax for values from (13, 0) to (19, maxvalue);
+insert into mc2pdmax values (32, 5);
+explain (costs off) select * from mc2pdmax where a = 32 and b >= -7;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Seq Scan on mc2pdmax_default mc2pdmax
+   Filter: ((b >= '-7'::integer) AND (a = 32))
+(2 rows)
+
+select * from mc2pdmax where a = 32 and b >= -7;
+ a  | b 
+----+---
+ 32 | 5
+(1 row)
+
+explain (costs off) select * from mc2pdmax where a >= 25 and b >= 0;
+              QUERY PLAN               
+---------------------------------------
+ Seq Scan on mc2pdmax_default mc2pdmax
+   Filter: ((a >= 25) AND (b >= 0))
+(2 rows)
+
+select * from mc2pdmax where a >= 25 and b >= 0;
+ a  | b 
+----+---
+ 32 | 5
+(1 row)
+
+-- The same lookup value reaches the key space above the bound here but not in
+-- the a = 19 case below, so the default partition must be scanned for the
+-- first query only.
+insert into mc2pdmax values (19, 5);
+select * from mc2pdmax where a >= 19 and b >= 5;
+ a  | b 
+----+---
+ 19 | 5
+ 32 | 5
+(2 rows)
+
+select * from mc2pdmax where a = 19 and b >= 5;
+ a  | b 
+----+---
+ 19 | 5
+(1 row)
+
+-- With the prefix pinned to the bound's first key, nothing carrying that
+-- prefix can sort above (19, maxvalue), so the default partition is not needed
+explain (costs off) select * from mc2pdmax where a = 19 and b >= 5;
+            QUERY PLAN             
+-----------------------------------
+ Seq Scan on mc2pdmax1 mc2pdmax
+   Filter: ((b >= 5) AND (a = 19))
+(2 rows)
+
+explain (costs off) select * from mc2pdmax where a >= 19 and b >= 5;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Append
+   ->  Seq Scan on mc2pdmax1 mc2pdmax_1
+         Filter: ((a >= 19) AND (b >= 5))
+   ->  Seq Scan on mc2pdmax_default mc2pdmax_2
+         Filter: ((a >= 19) AND (b >= 5))
+(5 rows)
+
+drop table mc2pdmax;
+create table mc2pdmin (a int, b int) partition by range (a, b);
+create table mc2pdmin_default partition of mc2pdmin default;
+create table mc2pdmin1 partition of mc2pdmin for values from (13, minvalue) to (19, 5);
+insert into mc2pdmin values (5, 5);
+explain (costs off) select * from mc2pdmin where a = 5 and b <= 7;
+              QUERY PLAN               
+---------------------------------------
+ Seq Scan on mc2pdmin_default mc2pdmin
+   Filter: ((b <= 7) AND (a = 5))
+(2 rows)
+
+select * from mc2pdmin where a = 5 and b <= 7;
+ a | b 
+---+---
+ 5 | 5
+(1 row)
+
+drop table mc2pdmin;
+-- Ensure the default partition is still pruned when the first key is unbounded
+create table mc2pinf (a int, b int) partition by range (a, b);
+create table mc2pinf_default partition of mc2pinf default;
+create table mc2pinf1 partition of mc2pinf for values from (0, 0) to (maxvalue, maxvalue);
+create table mc2pinf2 partition of mc2pinf for values from (minvalue, minvalue) to (0, 0);
+explain (costs off) select * from mc2pinf where a = 32 and b >= -7;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Seq Scan on mc2pinf1 mc2pinf
+   Filter: ((b >= '-7'::integer) AND (a = 32))
+(2 rows)
+
+explain (costs off) select * from mc2pinf where a = -32 and b <= 7;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Seq Scan on mc2pinf2 mc2pinf
+   Filter: ((b <= 7) AND (a = '-32'::integer))
+(2 rows)
+
+drop table mc2pinf;
+-- Ensure the uncovered key space matches nothing when there is no default
+create table mc2pnodef (a int, b int) partition by range (a, b);
+create table mc2pnodef1 partition of mc2pnodef for values from (13, 0) to (19, maxvalue);
+explain (costs off) select * from mc2pnodef where a = 32 and b >= -7;
+          QUERY PLAN           
+-------------------------------
+ Result
+   Replaces: Scan on mc2pnodef
+   One-Time Filter: false
+(3 rows)
+
+explain (costs off) select * from mc2pnodef where a = 15 and b >= 0;
+            QUERY PLAN             
+-----------------------------------
+ Seq Scan on mc2pnodef1 mc2pnodef
+   Filter: ((b >= 0) AND (a = 15))
+(2 rows)
+
+drop table mc2pnodef;
 -- boolean partitioning
 create table boolpart (a bool) partition by list (a);
 create table boolpart_default partition of boolpart default;
