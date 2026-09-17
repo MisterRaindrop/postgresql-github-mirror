@@ -1221,6 +1221,10 @@ Keywords_for_list_of_owner_roles, "PUBLIC"
 "   AND d.datname = pg_catalog.current_database() "\
 "   AND s.subdbid = d.oid"
 
+#define Query_for_list_of_large_objects \
+"SELECT oid FROM pg_catalog.pg_largeobject_metadata "\
+" WHERE oid::text LIKE '%s'"
+
 /* Privilege options shared between GRANT and REVOKE */
 #define Privilege_options_of_grant_and_revoke \
 "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", \
@@ -3372,6 +3376,10 @@ match_previous_words(int pattern_id,
 		set_completion_reference(prev2_wd);
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_tables_for_trigger);
 	}
+	else if (Matches("COMMENT", "ON", "LARGE", "OBJECT"))
+		COMPLETE_WITH_QUERY(Query_for_list_of_large_objects);
+	else if (Matches("COMMENT", "ON", "LARGE", "OBJECT", MatchAnyExcept("IS")))
+		COMPLETE_WITH("IS");
 	else if (Matches("COMMENT", "ON", MatchAny, MatchAnyExcept("IS")) ||
 			 Matches("COMMENT", "ON", MatchAny, MatchAny, MatchAnyExcept("IS")) ||
 			 Matches("COMMENT", "ON", MatchAny, MatchAny, MatchAny, MatchAnyExcept("IS")) ||
@@ -5249,6 +5257,22 @@ match_previous_words(int pattern_id,
 					  "LARGE OBJECT", "MATERIALIZED VIEW", "LANGUAGE",
 					  "PUBLICATION", "PROCEDURE", "ROLE", "ROUTINE", "SCHEMA",
 					  "SEQUENCE", "SUBSCRIPTION", "TABLESPACE", "TYPE", "VIEW");
+	else if (Matches("SECURITY", "LABEL", "ON", "EVENT", "TRIGGER"))
+		COMPLETE_WITH_QUERY(Query_for_list_of_event_triggers);
+	else if (Matches("SECURITY", "LABEL", "ON", "EVENT", "TRIGGER", MatchAny))
+		COMPLETE_WITH("IS");
+	else if (Matches("SECURITY", "LABEL", "ON", "FOREIGN", "TABLE"))
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_foreign_tables);
+	else if (Matches("SECURITY", "LABEL", "ON", "FOREIGN", "TABLE", MatchAny))
+		COMPLETE_WITH("IS");
+	else if (Matches("SECURITY", "LABEL", "ON", "MATERIALIZED", "VIEW"))
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_matviews);
+	else if (Matches("SECURITY", "LABEL", "ON", "MATERIALIZED", "VIEW", MatchAny))
+		COMPLETE_WITH("IS");
+	else if (Matches("SECURITY", "LABEL", "ON", "LARGE", "OBJECT"))
+		COMPLETE_WITH_QUERY(Query_for_list_of_large_objects);
+	else if (Matches("SECURITY", "LABEL", "ON", "LARGE", "OBJECT", MatchAny))
+		COMPLETE_WITH("IS");
 	else if (Matches("SECURITY", "LABEL", "ON", MatchAny, MatchAny))
 		COMPLETE_WITH("IS");
 
