@@ -36,6 +36,7 @@ tests += {
       't/025_stuck_on_old_timeline.pl',
       't/026_overwrite_contrecord.pl',
       't/027_stream_regress.pl',
+      't/027_stream_regress_sync.pl',
       't/028_pitr_timelines.pl',
       't/029_stats_restart.pl',
       't/030_stats_cleanup_replica.pl',
@@ -65,6 +66,7 @@ tests += {
       't/054_unlogged_sequence_promotion.pl',
       't/055_cascade_reconnect.pl',
       't/056_standby_snapshot_export.pl',
+      't/057_syncrep_release.pl',
     ],
   },
 }
