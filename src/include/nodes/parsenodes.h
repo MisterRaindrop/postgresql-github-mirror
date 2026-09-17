@@ -864,6 +864,7 @@ typedef struct DefElem
 								 * TypeName */
 	DefElemAction defaction;	/* unspecified action, or SET/ADD/DROP */
 	ParseLoc	location;		/* token location, or -1 if unknown */
+	ParseLoc	arg_location;	/* location of arg, or -1 if unknown */
 } DefElem;
 
 /*
@@ -4609,7 +4610,7 @@ typedef struct WaitStmt
 	/* LSN string from grammar */
 	char	   *lsn_literal pg_node_attr(query_jumble_ignore);
 	/* List of DefElem nodes */
-	List	   *options;
+	List	   *options pg_node_attr(custom_query_jumble);
 	/* token location, or -1 if unknown */
 	ParseLoc	lsn_location pg_node_attr(query_jumble_location);
 } WaitStmt;
