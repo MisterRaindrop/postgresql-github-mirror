@@ -66,6 +66,19 @@ $oldpub->safe_psql(
 	SELECT pg_create_logical_replication_slot('test_slot2', 'test_decoding');
 	SELECT pg_create_logical_replication_slot('test_slot3', 'test_decoding');
 ]);
+
+# check.c assumes the list syntax of output_plugin_libraries is validated by the
+# server, so take a moment to confirm that now. (This is difficult to test via
+# regression suite, because our SET grammar won't accept the bad syntax.)
+$oldpub->connect_fails(
+	"options='-c output_plugin_libraries=pgoutput,'",
+	"server validates output_plugin_libraries syntax",
+	expected_stderr => qr[
+		\Qinvalid value for parameter "output_plugin_libraries"\E
+		.*
+		\QList syntax is invalid.\E
+	]sx);
+
 $oldpub->stop();
 
 # 2. Set 'max_replication_slots' to be less than the number of slots (2)
