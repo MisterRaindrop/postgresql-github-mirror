@@ -370,6 +370,13 @@ WAIT FOR LSN '0/0' WITH (MODE 'primary_flush');
 WAIT FOR LSN '0/1' WITH (MODE 'primary_flush');
 WAIT FOR LSN '0/0' WITH (MODE 'primary_flush', NO_THROW);
 WAIT FOR LSN '0/0' WITH (MODE 'primary_flush', TIMEOUT 1);
+-- TIMEOUT is a value: these join the entry above.  The order the options
+-- are written in does not matter either.
+WAIT FOR LSN '0/0' WITH (MODE 'primary_flush', TIMEOUT 2);
+WAIT FOR LSN '0/0' WITH (TIMEOUT 3, MODE 'primary_flush');
+-- MODE says what to wait for, so each mode gets its own entry.
+WAIT FOR LSN '0/0' WITH (MODE 'standby_replay', TIMEOUT 1, NO_THROW);
+WAIT FOR LSN '0/0' WITH (MODE 'standby_write', TIMEOUT 1, NO_THROW);
 SELECT calls, rows, query FROM pg_stat_statements
   WHERE query LIKE 'WAIT FOR LSN%'
   ORDER BY query COLLATE "C";

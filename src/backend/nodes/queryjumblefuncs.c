@@ -79,6 +79,9 @@ static void _jumbleVariableSetStmt(JumbleState *jstate, Node *node);
 static void _jumbleRangeTblEntry_eref(JumbleState *jstate,
 									  RangeTblEntry *rte,
 									  Alias *expr);
+static void _jumbleWaitStmt_options(JumbleState *jstate,
+									WaitStmt *expr,
+									List *options);
 
 /*
  * Given a possibly multi-statement source string, confine our attention to the
@@ -772,6 +775,63 @@ _jumbleRangeTblEntry_eref(JumbleState *jstate,
 	 * This includes only the table name, the list of column names is ignored.
 	 */
 	JUMBLE_STRING(aliasname);
+}
+
+/*
+ * Custom query jumble function for WaitStmt.options.
+ *
+ * The WITH clause accepts each option at most once, and the order the options
+ * are written in does not change what the command does.  Jumble the options we
+ * know in a fixed order, so that a wait written as "WITH (mode 'm', timeout
+ * 't')" and one written as "WITH (timeout 't', mode 'm')" land in the same
+ * entry.
+ *
+ * TIMEOUT only bounds how long the command may wait, so it is recorded as a
+ * constant and normalized away; waits differing only in their timeout are
+ * counted together.  MODE and NO_THROW choose what the command does, so their
+ * values are jumbled as given.  An unrecognized option fails at execution
+ * time, but jumble it too, so that distinct failures do not collide.
+ */
+static void
+_jumbleWaitStmt_options(JumbleState *jstate, WaitStmt *expr, List *options)
+{
+	static const char *const knownOptions[] = {"mode", "no_throw", "timeout"};
+	ListCell   *lc;
+
+	for (int i = 0; i < lengthof(knownOptions); i++)
+	{
+		foreach(lc, options)
+		{
+			DefElem    *defel = lfirst_node(DefElem, lc);
+
+			if (strcmp(defel->defname, knownOptions[i]) != 0)
+				continue;
+
+			AppendJumble(jstate, (const unsigned char *) defel->defname,
+						 strlen(defel->defname) + 1);
+
+			if (strcmp(defel->defname, "timeout") == 0)
+				RecordConstLocation(jstate, false, defel->arg_location, -1);
+			else
+				_jumbleNode(jstate, defel->arg);
+		}
+	}
+
+	foreach(lc, options)
+	{
+		DefElem    *defel = lfirst_node(DefElem, lc);
+		bool		known = false;
+
+		for (int i = 0; i < lengthof(knownOptions); i++)
+			known = known || strcmp(defel->defname, knownOptions[i]) == 0;
+
+		if (!known)
+		{
+			AppendJumble(jstate, (const unsigned char *) defel->defname,
+						 strlen(defel->defname) + 1);
+			_jumbleNode(jstate, defel->arg);
+		}
+	}
 }
 
 /*
