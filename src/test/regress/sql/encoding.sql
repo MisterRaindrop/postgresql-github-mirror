@@ -57,6 +57,8 @@ SELECT substring(with_nul, 4, 1) FROM regress_encoding;
 SELECT substring(with_nul, 5, 1) FROM regress_encoding;
 SELECT convert_to(substring(with_nul, 5, 1), 'UTF8') FROM regress_encoding;
 SELECT regexp_replace(with_nul, '^caf(.)$', '\1') FROM regress_encoding;
+SELECT octet_length(normalize(with_nul)) FROM regress_encoding;
+SELECT with_nul IS NORMALIZED FROM regress_encoding;
 -- NUL = character
 SELECT with_nul, reverse(with_nul), reverse(reverse(with_nul)) FROM regress_encoding;
 
