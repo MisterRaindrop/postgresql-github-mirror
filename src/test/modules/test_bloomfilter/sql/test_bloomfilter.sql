@@ -6,6 +6,12 @@ SELECT test_bloomfilter(power => 23,
     seed => -1,
     tests => 1);
 
+-- A Bloom filter cannot be sized for an empty set.
+SELECT test_bloomfilter(power => 23,
+    nelements => 0,
+    seed => 0,
+    tests => 1);
+
 -- Equivalent "10 bits per element" tests for all possible bitset sizes:
 --
 -- SELECT test_bloomfilter(24, 1677722)
