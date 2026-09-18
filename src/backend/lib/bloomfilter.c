@@ -91,6 +91,9 @@ bloom_create(int64 total_elems, int bloom_work_mem, uint64 seed)
 	uint64		bitset_bytes;
 	uint64		bitset_bits;
 
+	if (total_elems <= 0)
+		elog(ERROR, "total number of elements must be greater than zero");
+
 	/*
 	 * Aim for two bytes per element; this is sufficient to get a false
 	 * positive rate below 1%, independent of the size of the bitset or total
@@ -98,7 +101,8 @@ bloom_create(int64 total_elems, int bloom_work_mem, uint64 seed)
 	 * the next lowest power of two turns out to be a significant drop, the
 	 * false positive rate still won't exceed 2% in almost all cases.
 	 */
-	bitset_bytes = Min(bloom_work_mem * UINT64CONST(1024), total_elems * 2);
+	bitset_bytes = Min(bloom_work_mem * UINT64CONST(1024),
+					   (uint64) total_elems * 2);
 	bitset_bytes = Max(1024 * 1024, bitset_bytes);
 
 	/*
