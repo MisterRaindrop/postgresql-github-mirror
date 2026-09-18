@@ -69,6 +69,8 @@
 #include "port/atomics/arch-x86.h"
 #elif defined(__powerpc__) || defined(__powerpc64__)
 #include "port/atomics/arch-ppc.h"
+#elif defined(__riscv)
+#include "port/atomics/arch-riscv.h"
 #endif
 
 /*
