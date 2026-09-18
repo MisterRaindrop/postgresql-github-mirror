@@ -79,6 +79,13 @@
 #include "port/pg_bswap.h"
 #include "varatt.h"
 
+#if defined(__riscv_vector) && defined(__has_include)
+#if __has_include(<riscv_vector.h>)
+#include <riscv_vector.h>
+#define USE_RISCV_VECTOR_NUL_SCAN
+#endif
+#endif
+
 
 /* --------------------------------
  *		pq_beginmessage		- initialize for sending a message
@@ -567,6 +574,10 @@ pq_getmsgtext(StringInfo msg, int rawbytes, int *nbytes)
 	return p;
 }
 
+#ifdef USE_RISCV_VECTOR_NUL_SCAN
+static int pq_find_nul_rvv(const char *str, int maxlen);
+#endif
+
 /* --------------------------------
  *		pq_getmsgstring - get a null-terminated text string (with conversion)
  *
@@ -587,8 +598,12 @@ pq_getmsgstring(StringInfo msg)
 	 * have a trailing null byte.  But check we found a null inside the
 	 * message.
 	 */
+#ifdef USE_RISCV_VECTOR_NUL_SCAN
+	slen = pq_find_nul_rvv(str, msg->len - msg->cursor);
+#else
 	slen = strlen(str);
-	if (msg->cursor + slen >= msg->len)
+#endif
+	if (slen < 0 || msg->cursor + slen >= msg->len)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROTOCOL_VIOLATION),
 				 errmsg("invalid string in message")));
@@ -596,6 +611,42 @@ pq_getmsgstring(StringInfo msg)
 
 	return pg_client_to_server(str, slen);
 }
+
+#ifdef USE_RISCV_VECTOR_NUL_SCAN
+/*
+ * Find a null byte without reading beyond the message boundary.  Keeping the
+ * vector length bounded by maxlen avoids the object and page-boundary
+ * over-read that an unbounded vector strlen implementation could perform.
+ */
+static int
+pq_find_nul_rvv(const char *str, int maxlen)
+{
+	size_t		offset = 0;
+	size_t		remaining;
+
+	if (maxlen <= 0)
+		return -1;
+	remaining = maxlen;
+
+	while (remaining > 0)
+	{
+		size_t		vl = __riscv_vsetvl_e8m8(remaining);
+		vuint8m8_t	bytes;
+		vbool1_t	zeroes;
+		long		position;
+
+		bytes = __riscv_vle8_v_u8m8((const uint8_t *) str + offset, vl);
+		zeroes = __riscv_vmseq_vx_u8m8_b1(bytes, 0, vl);
+		position = __riscv_vfirst_m_b1(zeroes, vl);
+		if (position >= 0)
+			return (int) (offset + (size_t) position);
+		offset += vl;
+		remaining -= vl;
+	}
+
+	return -1;
+}
+#endif
 
 /* --------------------------------
  *		pq_getmsgrawstring - get a null-terminated text string - NO conversion
@@ -616,8 +667,12 @@ pq_getmsgrawstring(StringInfo msg)
 	 * have a trailing null byte.  But check we found a null inside the
 	 * message.
 	 */
+#ifdef USE_RISCV_VECTOR_NUL_SCAN
+	slen = pq_find_nul_rvv(str, msg->len - msg->cursor);
+#else
 	slen = strlen(str);
-	if (msg->cursor + slen >= msg->len)
+#endif
+	if (slen < 0 || msg->cursor + slen >= msg->len)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROTOCOL_VIOLATION),
 				 errmsg("invalid string in message")));
