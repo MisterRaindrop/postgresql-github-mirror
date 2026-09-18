@@ -2895,7 +2895,10 @@ redo_act:
 				{
 					TupleTableSlot *inputslot;
 					TupleTableSlot *epqslot;
-
+					instr_time lock_start;
+					instr_time lock_end;
+					instr_time epq_start;
+					instr_time epq_end;
 					if (IsolationUsesXactSnapshot())
 						ereport(ERROR,
 								(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
@@ -2907,23 +2910,30 @@ redo_act:
 					 */
 					inputslot = EvalPlanQualSlot(context->epqstate, resultRelationDesc,
 												 resultRelInfo->ri_RangeTableIndex);
-
+					INSTR_TIME_SET_CURRENT(lock_start);
 					result = table_tuple_lock(resultRelationDesc, tupleid,
 											  estate->es_snapshot,
 											  inputslot, estate->es_output_cid,
 											  updateCxt.lockmode, LockWaitBlock,
 											  TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
 											  &context->tmfd);
-
+					INSTR_TIME_SET_CURRENT(lock_end);
+					INSTR_TIME_SUBTRACT(lock_end, lock_start);
+					elog(LOG, "EPQ DEBUG: table_tuple_lock took %.3f ms",
+						INSTR_TIME_GET_MILLISEC(lock_end));
 					switch (result)
 					{
 						case TM_Ok:
 							Assert(context->tmfd.traversed);
-
+							INSTR_TIME_SET_CURRENT(epq_start);
 							epqslot = EvalPlanQual(context->epqstate,
 												   resultRelationDesc,
 												   resultRelInfo->ri_RangeTableIndex,
 												   inputslot);
+							INSTR_TIME_SET_CURRENT(epq_end);
+							INSTR_TIME_SUBTRACT(epq_end, epq_start);
+							elog(LOG, "EPQ DEBUG: EvalPlanQual took %.3f ms",
+								INSTR_TIME_GET_MILLISEC(epq_end));
 							if (TupIsNull(epqslot))
 								/* Tuple not passing quals anymore, exiting... */
 								return NULL;
