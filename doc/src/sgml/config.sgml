@@ -9494,6 +9494,12 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
          This parameter can only be set in the <filename>postgresql.conf</filename>
          file or on the server command line.
         </para>
+        <para>
+         Larger values delay all autovacuum work in a database, including
+         vacuums that prevent transaction ID wraparound.  Raising this
+         setting is rarely useful, except to reduce the overhead of starting
+         workers in clusters with a very large number of databases.
+        </para>
        </listitem>
       </varlistentry>
 
