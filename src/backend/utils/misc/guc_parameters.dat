@@ -208,7 +208,7 @@
   variable => 'autovacuum_naptime',
   boot_val => '60',
   min => '1',
-  max => 'INT_MAX / 1000',
+  max => '3600',
 },
 
 { name => 'autovacuum_vacuum_cost_delay', type => 'real', context => 'PGC_SIGHUP', group => 'VACUUM_AUTOVACUUM',

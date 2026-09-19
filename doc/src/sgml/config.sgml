@@ -9490,7 +9490,8 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
          database and issues <command>VACUUM</command> and <command>ANALYZE</command> commands
          as needed for tables in that database.
          If this value is specified without units, it is taken as seconds.
-         The default is one minute (<literal>1min</literal>).
+         The default is one minute (<literal>1min</literal>), and the
+         maximum is one hour (<literal>1h</literal>).
          This parameter can only be set in the <filename>postgresql.conf</filename>
          file or on the server command line.
         </para>
