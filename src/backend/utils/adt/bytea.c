@@ -38,6 +38,7 @@ static bytea *bytea_catenate(bytea *t1, bytea *t2);
 static bytea *bytea_substring(Datum str, int S, int L,
 							  bool length_not_specified);
 static bytea *bytea_overlay(bytea *t1, bytea *t2, int sp, int sl);
+static void bytea_set_bytes(bytea *res, int32 n, int32 newByte, int32 count);
 
 typedef struct
 {
@@ -698,7 +699,8 @@ byteaGetBit(PG_FUNCTION_ARGS)
  * byteaSetByte
  *
  * Given an instance of type 'bytea' creates a new one with
- * the Nth byte set to the given value.
+ * the Nth byte set to the given value.  byteaSetByteRange
+ * instead sets 'count' consecutive bytes starting at the Nth.
  *
  *-------------------------------------------------------------
  */
@@ -708,27 +710,57 @@ byteaSetByte(PG_FUNCTION_ARGS)
 	bytea	   *res = PG_GETARG_BYTEA_P_COPY(0);
 	int32		n = PG_GETARG_INT32(1);
 	int32		newByte = PG_GETARG_INT32(2);
-	int			len;
 
-	len = VARSIZE(res) - VARHDRSZ;
+	bytea_set_bytes(res, n, newByte, 1);
 
-	if (n < 0 || n >= len)
+	PG_RETURN_BYTEA_P(res);
+}
+
+Datum
+byteaSetByteRange(PG_FUNCTION_ARGS)
+{
+	bytea	   *res = PG_GETARG_BYTEA_P_COPY(0);
+	int32		n = PG_GETARG_INT32(1);
+	int32		newByte = PG_GETARG_INT32(2);
+	int32		count = PG_GETARG_INT32(3);
+
+	bytea_set_bytes(res, n, newByte, count);
+
+	PG_RETURN_BYTEA_P(res);
+}
+
+/* Validate and set 'count' bytes of 'res' starting at 'n', in place. */
+static void
+bytea_set_bytes(bytea *res, int32 n, int32 newByte, int32 count)
+{
+	int			len = VARSIZE(res) - VARHDRSZ;
+
+	if (count < 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("count must not be negative")));
+
+	/* An empty range may start just past the last byte. */
+	if (n < 0 || n > len || (count > 0 && n == len))
 		ereport(ERROR,
 				(errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
 				 errmsg("index %d out of valid range, 0..%d",
-						n, len - 1)));
+						n, count == 0 ? len : len - 1)));
+
+	/* n <= len here, so this cannot overflow */
+	if (count > len - n)
+		ereport(ERROR,
+				(errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+				 errmsg("bytes %d..%" PRId64 " out of valid range, 0..%d",
+						n, (int64) n + count - 1, len - 1)));
 
 	if (newByte < 0 || newByte > 255)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("new byte must be 0..255")));
 
-	/*
-	 * Now set the byte.
-	 */
-	((unsigned char *) VARDATA(res))[n] = newByte;
-
-	PG_RETURN_BYTEA_P(res);
+	if (count > 0)
+		memset(VARDATA(res) + n, newByte, count);
 }
 
 /*-------------------------------------------------------------

@@ -481,17 +481,24 @@
         </indexterm>
         <function>set_byte</function> ( <parameter>bytes</parameter> <type>bytea</type>,
         <parameter>n</parameter> <type>integer</type>,
-        <parameter>newvalue</parameter> <type>integer</type> )
+        <parameter>newvalue</parameter> <type>integer</type>
+        <optional>, <parameter>count</parameter> <type>integer</type> </optional> )
         <returnvalue>bytea</returnvalue>
        </para>
        <para>
         Sets <link linkend="functions-zerobased-note">n'th</link> byte in
         binary string to <parameter>newvalue</parameter>, which must be
-        between 0 and 255.
+        between 0 and 255.  If <parameter>count</parameter> is specified,
+        sets <parameter>count</parameter> consecutive bytes starting at
+        byte <parameter>n</parameter>; the range must lie within the string.
        </para>
        <para>
         <literal>set_byte('\x1234567890'::bytea, 4, 64)</literal>
         <returnvalue>\x1234567840</returnvalue>
+       </para>
+       <para>
+        <literal>set_byte('\x1234567890'::bytea, 1, 255, 3)</literal>
+        <returnvalue>\x12ffffff90</returnvalue>
        </para></entry>
       </row>
 
