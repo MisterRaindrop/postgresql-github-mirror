@@ -17,6 +17,14 @@
 #include "postgres_fe.h"
 #endif
 
+/*
+ * ERROR_UNTRUSTED_MOUNT_POINT was added in newer Windows SDKs; define it here
+ * so that we still build against older SDK or MinGW headers that lack it.
+ */
+#ifndef ERROR_UNTRUSTED_MOUNT_POINT
+#define ERROR_UNTRUSTED_MOUNT_POINT 448L
+#endif
+
 static const struct
 {
 	DWORD		winerr;
@@ -170,6 +178,21 @@ static const struct
 	},
 	{
 		ERROR_CANT_RESOLVE_FILENAME, ENOENT
+	},
+	{
+		/*
+		 * ERROR_UNTRUSTED_MOUNT_POINT ("The path cannot be traversed because
+		 * it contains an untrusted mount point") is reported by recent
+		 * Windows versions when a reparse point is considered untrusted, for
+		 * example a junction created by a non-administrative user that points
+		 * outside of that user's scope.  PostgreSQL uses junction points to
+		 * emulate symbolic links for tablespaces, so this can be reported for
+		 * paths under pg_tblspc.  Map it like the other "this path cannot be
+		 * resolved" errors above, so that callers using
+		 * errcode_for_file_access() report a sensible condition instead of the
+		 * EINVAL that an unmapped code falls back to.
+		 */
+		ERROR_UNTRUSTED_MOUNT_POINT, ENOENT
 	}
 };
 
