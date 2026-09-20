@@ -486,7 +486,8 @@
        </para>
        <para>
         Sets <link linkend="functions-zerobased-note">n'th</link> byte in
-        binary string to <parameter>newvalue</parameter>.
+        binary string to <parameter>newvalue</parameter>, which must be
+        between 0 and 255.
        </para>
        <para>
         <literal>set_byte('\x1234567890'::bytea, 4, 64)</literal>

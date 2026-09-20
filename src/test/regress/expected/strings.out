@@ -2949,6 +2949,10 @@ SELECT set_byte('\x1234567890abcdef00'::bytea, 7, 11);
 
 SELECT set_byte('\x1234567890abcdef00'::bytea, 99, 11);  -- error
 ERROR:  index 99 out of valid range, 0..8
+SELECT set_byte('\x1234567890abcdef00'::bytea, 0, 256);  -- error
+ERROR:  new byte must be 0..255
+SELECT set_byte('\x1234567890abcdef00'::bytea, 0, -1);  -- error
+ERROR:  new byte must be 0..255
 --
 -- conversions between bytea and integer types
 --

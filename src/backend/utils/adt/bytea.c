@@ -718,6 +718,11 @@ byteaSetByte(PG_FUNCTION_ARGS)
 				 errmsg("index %d out of valid range, 0..%d",
 						n, len - 1)));
 
+	if (newByte < 0 || newByte > 255)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("new byte must be 0..255")));
+
 	/*
 	 * Now set the byte.
 	 */

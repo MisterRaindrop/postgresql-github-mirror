@@ -957,6 +957,8 @@ SELECT get_byte('\x1234567890abcdef00'::bytea, 3);
 SELECT get_byte('\x1234567890abcdef00'::bytea, 99);  -- error
 SELECT set_byte('\x1234567890abcdef00'::bytea, 7, 11);
 SELECT set_byte('\x1234567890abcdef00'::bytea, 99, 11);  -- error
+SELECT set_byte('\x1234567890abcdef00'::bytea, 0, 256);  -- error
+SELECT set_byte('\x1234567890abcdef00'::bytea, 0, -1);  -- error
 
 --
 -- conversions between bytea and integer types
