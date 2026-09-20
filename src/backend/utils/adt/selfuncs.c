@@ -118,10 +118,12 @@
 #include "optimizer/paths.h"
 #include "optimizer/plancat.h"
 #include "parser/parse_clause.h"
+#include "parser/parse_oper.h"
 #include "parser/parse_relation.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
 #include "statistics/statistics.h"
+#include "statistics/stat_utils.h"
 #include "storage/bufmgr.h"
 #include "utils/acl.h"
 #include "utils/array.h"
@@ -137,6 +139,7 @@
 #include "utils/selfuncs.h"
 #include "utils/snapmgr.h"
 #include "utils/spccache.h"
+#include "utils/sortsupport.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
 #include "utils/typcache.h"
@@ -155,6 +158,40 @@
 #else
 #define EQJOINSEL_MCV_HASH_THRESHOLD 20
 #endif
+
+/*
+ * Invoke the comparison function against a single MCV entry.
+ * Returns true if comparison succeeds and result is not null.
+ */
+#define MCV_ENTRY_MATCH(fcinfo, arg_mcv, sslot, i, fresult) \
+( \
+	(fcinfo->args[arg_mcv].value = sslot.values[i]), \
+	(fcinfo->isnull = false), \
+	(fresult = FunctionCallInvoke(fcinfo)), \
+	(!fcinfo->isnull && DatumGetBool(fresult)) \
+)
+
+/*
+ * Status codes for IN_MCV_RANGE:
+ * 0 - Must compare against every MCV entry.
+ * 1 - Within MCV range; still need to check existence
+ *     via binary search or other means.
+ * 2 - Outside MCV range; no per-MCV comparison required.
+ */
+#define IN_MCV_RANGE_UNKNOWN	0
+#define IN_MCV_RANGE_YES		1
+#define IN_MCV_RANGE_NO			2
+
+/* Threshold: MCV entries worthy of special comparison (e.g. binary search) */
+#define MCV_SPECIAL_COMPARE_THRESHOLD	3
+
+/*
+ * When using "<" in ApplySortComparator(constval, ?, sslot.values[?], ?, ?),
+ * indicates constval's relative position compared with sslot.values[?].
+ */
+#define ON_LEFT(i)  ((i) < 0)
+#define ON_EQUAL(i) ((i) == 0)
+#define ON_RIGHT(i) ((i) > 0)
 
 /* Entries in the simplehash hash table used by eqjoinsel_find_matches */
 typedef struct MCVHashEntry
@@ -413,6 +450,12 @@ var_eq_const(VariableStatData *vardata, Oid oproid, Oid collation,
 		AttStatsSlot sslot;
 		bool		match = false;
 		int			i;
+		double		sumcommon = 0.0;
+		int			statskind;
+
+		statskind = get_attstatsslot_mcv(&sslot, vardata->statsTuple,
+										 InvalidOid,
+										 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS);
 
 		/*
 		 * Is the constant "=" to any of the column's most common values?
@@ -421,12 +464,14 @@ var_eq_const(VariableStatData *vardata, Oid oproid, Oid collation,
 		 * don't like this, maybe you shouldn't be using eqsel for your
 		 * operator...)
 		 */
-		if (get_attstatsslot(&sslot, vardata->statsTuple,
-							 STATISTIC_KIND_MCV, InvalidOid,
-							 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS))
+		if (statskind)
 		{
 			LOCAL_FCINFO(fcinfo, 2);
 			FmgrInfo	eqproc;
+			bool		scan_entire_mcv = false;
+			int			in_mcv_range = IN_MCV_RANGE_UNKNOWN;
+			SortSupportData ssup = {0};
+			int			arg_mcv;
 
 			fmgr_info(opfuncoid, &eqproc);
 
@@ -442,24 +487,197 @@ var_eq_const(VariableStatData *vardata, Oid oproid, Oid collation,
 			fcinfo->args[1].isnull = false;
 			/* be careful to apply operator right way 'round */
 			if (varonleft)
-				fcinfo->args[1].value = constval;
-			else
-				fcinfo->args[0].value = constval;
-
-			for (i = 0; i < sslot.nvalues; i++)
 			{
-				Datum		fresult;
+				fcinfo->args[1].value = constval;
+				arg_mcv = 0;
+			}
+			else
+			{
+				fcinfo->args[0].value = constval;
+				arg_mcv = 1;
+			}
 
-				if (varonleft)
-					fcinfo->args[0].value = sslot.values[i];
-				else
-					fcinfo->args[1].value = sslot.values[i];
-				fcinfo->isnull = false;
-				fresult = FunctionCallInvoke(fcinfo);
-				if (!fcinfo->isnull && DatumGetBool(fresult))
+			selec = 0.0;
+			i = 0;
+
+			if (sslot.stacoll != collation && OidIsValid(collation))
+			{
+				/*
+				 * Scanning the entire MCV array is needed when the collation
+				 * used for the comparison is nondeterministic and differs
+				 * from the statistics collation. In this case, the comparison
+				 * may match multiple MCV values, so we must continue scanning
+				 * after finding a match.
+				 */
+				pg_locale_t mylocale = pg_newlocale_from_collation(collation);
+
+				scan_entire_mcv = !mylocale->deterministic;
+			}
+
+			if (sslot.stacoll == collation &&
+				statskind == STATISTIC_KIND_MCV_VALUE_SORTED &&
+				sslot.nvalues > MCV_SPECIAL_COMPARE_THRESHOLD &&
+				comparison_ops_are_compatible(sslot.staop, oproid))
+			{
+				/*
+				 * If collations match, datatype is sortable and MCV array
+				 * sorted, optimize comparisons using this property:
+				 *
+				 * - If it is equal to the first or last MCV value, the lookup
+				 * can be completed immediately.
+				 *
+				 * - If it falls within the MCV range, use binary search to
+				 * find a matching value, reducing the average number of
+				 * comparisons from N/2 to at most log(N).
+				 *
+				 * - If it falls outside the MCV range, subsequent processing
+				 * can sum sumcommon directly without comparing against the
+				 * MCV values. In this worst-case scenario where the constant
+				 * does not match any MCV value, this reduces the number of
+				 * comparisons from N to at most 2.
+				 *
+				 */
+				Oid			ltopr;
+				Oid			eqopr;
+
+				/* Look for default "<" and "=" operators for sslot.valuetype */
+				get_sort_group_operators(sslot.valuetype,
+										 false, false, false,
+										 &ltopr, &eqopr, NULL,
+										 NULL);
+
+				if (OidIsValid(eqopr) && OidIsValid(ltopr))
 				{
-					match = true;
-					break;
+					/* datatype is sortable */
+					int			compare;
+
+					scan_entire_mcv = false;	/* And no full MCV scan
+												 * required */
+
+					ssup.ssup_cxt = CurrentMemoryContext;
+					ssup.ssup_collation = sslot.stacoll;
+					ssup.ssup_nulls_first = false;
+					ssup.abbreviate = false;
+					PrepareSortSupportFromOrderingOp(ltopr, &ssup);
+
+					/* First compare against values[0] */
+					compare = ApplySortComparator(constval, false,
+												  sslot.values[0], false, &ssup);
+					if (ON_EQUAL(compare))
+					{
+						/*
+						 * Constant is "=" to this common value.  We know
+						 * selectivity exactly (or as exactly as ANALYZE could
+						 * calculate it, anyway).
+						 */
+						match = true;
+						selec = sslot.numbers[0];
+					}
+					else if (ON_LEFT(compare) || sslot.nvalues == 1)
+					{
+						in_mcv_range = IN_MCV_RANGE_NO;
+					}
+					else
+					{
+						/* Next compare against values[sslot.nvalues - 1] */
+						compare = ApplySortComparator(constval, false,
+													  sslot.values[sslot.nvalues - 1], false, &ssup);
+						if (ON_EQUAL(compare))
+						{
+							/*
+							 * Constant is "=" to this common value.  We know
+							 * selectivity exactly (or as exactly as ANALYZE
+							 * could calculate it, anyway).
+							 */
+							match = true;
+							selec = sslot.numbers[sslot.nvalues - 1];
+						}
+						else if (ON_RIGHT(compare) || sslot.nvalues == 2)
+							in_mcv_range = IN_MCV_RANGE_NO;
+						else if (ON_LEFT(compare))
+						{
+							int		tmp_l_bound;
+							int		tmp_r_bound;
+
+							/*
+							 * For binary search:
+							 * refers to the first and last uncompared elements.
+							 */
+							tmp_l_bound = 1;
+							tmp_r_bound = sslot.nvalues - 2;
+
+							while (tmp_l_bound <= tmp_r_bound)
+							{
+								int		mid = (tmp_l_bound + tmp_r_bound) / 2;
+
+								compare = ApplySortComparator(constval, false,
+															  sslot.values[mid], false, &ssup);
+								if (ON_EQUAL(compare))
+								{
+									/*
+									 * Constant is "=" to this common value.
+									 * We know selectivity exactly (or as
+									 * exactly as ANALYZE could calculate it,
+									 * anyway).
+									 */
+									match = true;
+									selec = sslot.numbers[mid];
+
+									break;
+								}
+								else if (ON_RIGHT(compare))
+									tmp_l_bound = mid + 1;
+								else if (ON_LEFT(compare))
+									tmp_r_bound = mid - 1;
+							}
+
+							if (!match)
+								in_mcv_range = IN_MCV_RANGE_NO;
+						}
+					}
+				}
+			}
+
+			if (!match)
+			{
+				/*
+				 * Compare the constant expression with the MCVs.
+				 *
+				 * If the constant matches the current MCV, stop here when a
+				 * full MCV scan is not required. Otherwise, continue scanning
+				 * the remaining MCVs and accumulate the selectivity of all
+				 * matching MCVs.
+				 *
+				 * While scanning, also accumulate the selectivity of the MCVs
+				 * examined so far. This is used later to estimate the
+				 * selectivity of a non-NULL constant that does not match any
+				 * MCV.
+				 */
+				for (i = 0; i < sslot.nvalues; i++)
+				{
+					if (in_mcv_range == IN_MCV_RANGE_UNKNOWN || scan_entire_mcv)
+					{
+						Datum		fresult;
+
+						if MCV_ENTRY_MATCH(fcinfo, arg_mcv, sslot, i, fresult)
+						{
+							/*
+							 * Constant is "=" to this common value.  We know
+							 * selectivity exactly (or as exactly as ANALYZE
+							 * could calculate it, anyway).
+							 */
+							match = true;
+							if (!scan_entire_mcv)
+							{
+								selec = sslot.numbers[i];
+								break;
+							}
+
+							selec += sslot.numbers[i];
+						}
+					}
+
+					sumcommon += sslot.numbers[i];
 				}
 			}
 		}
@@ -469,26 +687,15 @@ var_eq_const(VariableStatData *vardata, Oid oproid, Oid collation,
 			i = 0;				/* keep compiler quiet */
 		}
 
-		if (match)
-		{
-			/*
-			 * Constant is "=" to this common value.  We know selectivity
-			 * exactly (or as exactly as ANALYZE could calculate it, anyway).
-			 */
-			selec = sslot.numbers[i];
-		}
-		else
+		if (!match)
 		{
 			/*
 			 * Comparison is against a constant that is neither NULL nor any
 			 * of the common values.  Its selectivity cannot be more than
 			 * this:
 			 */
-			double		sumcommon = 0.0;
 			double		otherdistinct;
 
-			for (i = 0; i < sslot.nnumbers; i++)
-				sumcommon += sslot.numbers[i];
 			selec = 1.0 - sumcommon - nullfrac;
 			CLAMP_PROBABILITY(selec);
 
@@ -572,6 +779,7 @@ var_eq_non_const(VariableStatData *vardata, Oid oproid, Oid collation,
 	{
 		double		ndistinct;
 		AttStatsSlot sslot;
+		int			statskind;
 
 		/*
 		 * Search is for a value that we do not know a priori, but we will
@@ -592,12 +800,16 @@ var_eq_non_const(VariableStatData *vardata, Oid oproid, Oid collation,
 		 * Cross-check: selectivity should never be estimated as more than the
 		 * most common value's.
 		 */
-		if (get_attstatsslot(&sslot, vardata->statsTuple,
-							 STATISTIC_KIND_MCV, InvalidOid,
-							 ATTSTATSSLOT_NUMBERS))
+		statskind = get_attstatsslot_mcv(&sslot, vardata->statsTuple,
+										 InvalidOid,
+										 ATTSTATSSLOT_NUMBERS);
+		if (statskind)
 		{
-			if (sslot.nnumbers > 0 && selec > sslot.numbers[0])
-				selec = sslot.numbers[0];
+			double		max_numbers;
+
+			max_numbers = max_mcv_numbers(&sslot, statskind);
+			if (selec > max_numbers)
+				selec = max_numbers;
 			free_attstatsslot(&sslot);
 		}
 	}
@@ -755,7 +967,7 @@ scalarineqsel(PlannerInfo *root, Oid operator, bool isgt, bool iseq,
 	 * by MCV entries.
 	 */
 	mcv_selec = mcv_selectivity(vardata, &opproc, collation, constval, true,
-								&sumcommon);
+								&sumcommon, operator);
 
 	/*
 	 * If there is a histogram, determine which bin the constant falls in, and
@@ -807,23 +1019,29 @@ scalarineqsel(PlannerInfo *root, Oid operator, bool isgt, bool iseq,
 double
 mcv_selectivity(VariableStatData *vardata, FmgrInfo *opproc, Oid collation,
 				Datum constval, bool varonleft,
-				double *sumcommonp)
+				double *sumcommonp, Oid operator)
 {
 	double		mcv_selec,
 				sumcommon;
 	AttStatsSlot sslot;
 	int			i;
+	int			statskind;
 
 	mcv_selec = 0.0;
 	sumcommon = 0.0;
 
 	if (HeapTupleIsValid(vardata->statsTuple) &&
 		statistic_proc_security_check(vardata, opproc->fn_oid) &&
-		get_attstatsslot(&sslot, vardata->statsTuple,
-						 STATISTIC_KIND_MCV, InvalidOid,
-						 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS))
+		(statskind = get_attstatsslot_mcv(&sslot, vardata->statsTuple,
+										  InvalidOid,
+										  ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS)))
 	{
 		LOCAL_FCINFO(fcinfo, 2);
+		Datum		fresult;
+		int			in_mcv_range = IN_MCV_RANGE_UNKNOWN;
+		int			lBound = -1;	/* -1 means unknown */
+		int			rBound = -1;	/* -1 means unknown */
+		int			arg_mcv;
 
 		/*
 		 * We invoke the opproc "by hand" so that we won't fail on NULL
@@ -838,24 +1056,353 @@ mcv_selectivity(VariableStatData *vardata, FmgrInfo *opproc, Oid collation,
 		fcinfo->args[1].isnull = false;
 		/* be careful to apply operator right way 'round */
 		if (varonleft)
+		{
 			fcinfo->args[1].value = constval;
+			arg_mcv = 0;
+		}
 		else
+		{
 			fcinfo->args[0].value = constval;
+			arg_mcv = 1;
+		}
+
+		if (sslot.stacoll == collation &&
+			statskind == STATISTIC_KIND_MCV_VALUE_SORTED &&
+			sslot.nvalues > MCV_SPECIAL_COMPARE_THRESHOLD &&
+			comparison_ops_are_compatible(sslot.staop, operator))
+		{
+			/*
+			 * If collations match, datatype is sortable and MCV array sorted,
+			 * optimize comparisons using this property.
+			 */
+			Oid			ltopr;
+			Oid			eqopr;
+
+			/* Look for default "<" and "=" operators for sslot.valuetype. */
+			get_sort_group_operators(sslot.valuetype,
+									 false, false, false,
+									 &ltopr, &eqopr, NULL,
+									 NULL);
+			if (OidIsValid(eqopr) && OidIsValid(ltopr))
+			{
+				RegProcedure 	oprsel;
+				SortSupportData ssup = {0};
+				int				compare;
+
+				ssup.ssup_cxt = CurrentMemoryContext;
+				ssup.ssup_collation = sslot.stacoll;
+				ssup.ssup_nulls_first = false;
+				ssup.abbreviate = false;
+				PrepareSortSupportFromOrderingOp(ltopr, &ssup);
+
+				oprsel = get_oprrest(operator);
+				if (oprsel == F_SCALARLTSEL || oprsel == F_SCALARLESEL)
+				{
+					/* For "<" and "<=", compare starting at Min value: values[0] */
+					compare = ApplySortComparator(constval, false,
+												  sslot.values[0], false, &ssup);
+					if (ON_LEFT(compare))
+					{
+						/* constval < Min value:
+						 * all MCV entries < constval, no MCV entries satisfy the predicate.
+						 */
+						in_mcv_range = IN_MCV_RANGE_NO;
+					}
+					else if (ON_EQUAL(compare))
+					{
+						/* constval == Min value */
+						if (oprsel == F_SCALARLTSEL)
+						{
+							/* When oprsel is "<":
+							 * but all MCV entries < constval, so no MCV entries satisfy the predicate.
+							 */
+							in_mcv_range = IN_MCV_RANGE_NO;
+						}
+						else if (oprsel ==F_SCALARLESEL)
+						{
+							/* When oprsel is "<=":
+							 * only the Min value satisfy the predicate.
+							 */
+							in_mcv_range = IN_MCV_RANGE_YES;
+							lBound = 0;
+							rBound = lBound;
+						}
+					}
+					else if (ON_RIGHT(compare))
+					{
+						/* Min value < constval.
+						 * Left boundary determined, now find right boundary.
+						 */
+						in_mcv_range = IN_MCV_RANGE_YES;
+						lBound = 0;
+
+						/* compare at Max value: values[sslot.nvalues - 1] */
+						compare = ApplySortComparator(constval, false,
+													  sslot.values[sslot.nvalues - 1], false, &ssup);
+						if (ON_RIGHT(compare))
+						{
+							/*
+							 * Max value < constval:
+							 * all MCV entries "<"/"<=" constval,
+							 * all MCV entries satisfy the predicate.
+							 */
+							rBound = sslot.nvalues - 1;
+						}
+						else if (ON_EQUAL(compare))
+						{
+							/* Max value == constval */
+							if (oprsel == F_SCALARLTSEL)
+							{
+								/* when oprsel is "<":
+								 * values[sslot.nvalues - 2] is the rightmost entry satisfying the predicate.
+								 */
+								rBound = sslot.nvalues - 2;
+							}
+							else if (oprsel == F_SCALARLESEL)
+							{
+								/*
+								 * When oprsel is "<=":
+								 * all MCV entries "<=" constval,
+								 * all MCV entries satisfy the predicate.
+								 */
+								rBound = sslot.nvalues - 1;
+							}
+						}
+						else if ON_LEFT(compare)
+						{
+							/* Max value > constval:
+							 * binary search.
+							 */
+							int		tmp_l_bound;
+							int		tmp_r_bound;
+
+							/* Initially set right boundary equal to left boundary */
+							rBound = lBound;
+
+							/*
+							 * For binary search:
+							 * refers to the 1st and last uncompared elements.
+							 */
+							tmp_l_bound = lBound + 1;
+							tmp_r_bound = sslot.nvalues - 2;
+
+							while (tmp_l_bound <= tmp_r_bound)
+							{
+								int			mid = (tmp_l_bound + tmp_r_bound) / 2;
+
+								compare = ApplySortComparator(constval, false,
+												  sslot.values[mid], false, &ssup);
+								if (ON_RIGHT(compare))
+								{
+									/* values[mid] < constval:
+									 * continue rightward search.
+									 */
+									rBound = mid;
+									tmp_l_bound = mid + 1;
+
+								}
+								else if(ON_EQUAL(compare))
+								{
+									/* values[mid] = constval */
+									if (oprsel == F_SCALARLTSEL)
+									{
+										/*
+										 * when oprsel is "<":
+										 * values[mid - 1] is the max one satisfy the predicate.
+										 */
+										rBound = mid - 1;
+									}
+									else if (oprsel == F_SCALARLESEL)
+									{
+										/*
+										 * When oprsel is "<=":
+										 * values[mid] is the max one satisfy the predicate.
+										 */
+										rBound = mid;
+									}
+
+									break;  /* stop search */
+								}
+								else if(ON_LEFT(compare))
+								{
+									/* continue leftward search */
+									tmp_r_bound = mid - 1;
+								}
+							}
+						}
+					}
+				}
+				else if (oprsel == F_SCALARGTSEL || oprsel == F_SCALARGESEL)
+				{
+					/* For '>' and '>=', compare starting at Max value: [sslot.nvalues - 1] */
+					compare = ApplySortComparator(constval, false,
+												  sslot.values[sslot.nvalues - 1], false, &ssup);
+					if (ON_RIGHT(compare))
+					{
+						/*
+						* constval > Max value:
+						* all MCV entries < constval, no MCV entries satisfy the predicate.
+						*/
+						in_mcv_range = IN_MCV_RANGE_NO;
+					}
+					else if (ON_EQUAL(compare))
+					{
+						/* constval == Max value */
+						if (oprsel == F_SCALARGTSEL)
+						{
+							/*
+							* When oprsel is ">":
+							* All MCV entries < constval, no MCV entries satisfy the predicate.
+							*/
+							in_mcv_range = IN_MCV_RANGE_NO;
+						}
+						else if (oprsel == F_SCALARGESEL)
+						{
+							/*
+							 * When oprsel is ">=":
+							 * only the Max value satisfies the predicate.
+							 */
+							in_mcv_range = IN_MCV_RANGE_YES;
+							rBound = sslot.nvalues - 1;
+							lBound = rBound;
+						}
+					}
+					else if (ON_LEFT(compare))
+					{
+						/*
+						 * constval < Max value.
+						 * Right boundary determined, now find left boundary.
+						 */
+						in_mcv_range = IN_MCV_RANGE_YES;
+						rBound = sslot.nvalues - 1;
+
+						/* compare at Min value: values[0] */
+						compare = ApplySortComparator(constval, false,
+												  sslot.values[0], false, &ssup);
+						if (ON_LEFT(compare))
+						{
+							/* constval < Min value:
+							 * All MCV entries ">"/">=" constval,
+							 * all MCV entries satisfy the predicate.
+							 */
+							lBound = 0;
+						}
+						else if (ON_EQUAL(compare))
+						{
+							/* constval == Min value */
+							if (oprsel == F_SCALARGTSEL)
+							{
+								/* When oprsel is ">":
+								 * values[1] is the leftmost entry satisfying the predicate.
+								 */
+								lBound = 1;
+							}
+							else if (oprsel == F_SCALARGESEL)
+							{
+								/* when oprsel is ">=":
+								 * All MCV entries ">=" constval,
+								 * all MCV entries satisfy the predicate.
+								 */
+								lBound = 0;
+							}
+						}
+						else if (ON_RIGHT(compare))
+						{
+							/* Min value > constval:
+							 * binary search.
+							 */
+							int		tmp_l_bound;
+							int		tmp_r_bound;
+
+							/* Initially set left boundary equal to right boundary */
+							lBound = rBound;
+
+							/*
+							 * For binary search:
+							 * refers to the 1st and last uncompared elements.
+							 */
+							tmp_l_bound = 1;
+							tmp_r_bound = rBound - 1;
+
+							while (tmp_l_bound <= tmp_r_bound)
+							{
+								int			mid = (tmp_l_bound + tmp_r_bound) / 2;
+
+								compare = ApplySortComparator(constval, false,
+													sslot.values[mid], false, &ssup);
+
+								if (ON_LEFT(compare))
+								{
+									/*
+									 *constval < values[mid]:
+									 * continue leftward search.
+									 */
+									lBound = mid;
+									tmp_r_bound = mid - 1;
+								}
+								else if (ON_EQUAL(compare))
+								{
+									/* values[mid] == constval */
+									if (oprsel == F_SCALARGTSEL)
+									{
+										/*
+										 * When oprsel is ">":
+										 * values[mid + 1] is the min one satisfy the predicate.
+										 */
+										lBound = mid + 1;
+									}
+									else if (oprsel == F_SCALARGESEL)
+									{
+										/*
+										 * When oprsel is >=:
+										 * values[mid] is the min one satisfy the predicate.
+										 */
+										lBound = mid;
+									}
+
+									break;  /* stop search */
+								}
+								else if (ON_RIGHT(compare))
+								{
+									/* continue rightward search */
+									tmp_l_bound = mid + 1;
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 
 		for (i = 0; i < sslot.nvalues; i++)
 		{
-			Datum		fresult;
+			sumcommon += sslot.numbers[i];	/* Accumulate sumcommon first */
 
-			if (varonleft)
-				fcinfo->args[0].value = sslot.values[i];
-			else
-				fcinfo->args[1].value = sslot.values[i];
-			fcinfo->isnull = false;
-			fresult = FunctionCallInvoke(fcinfo);
-			if (!fcinfo->isnull && DatumGetBool(fresult))
+			/*
+			 * If outside the MCV range, no comparison needed;
+			 *
+			 * If already known to be within MCV bounds, only accumulate
+			 * mcv_selec over entries in range with no extra comparisons;
+			 *
+			 * Otherwise, perform on-the-fly comparisons to identify matches
+			 * and accumulate mcv_selec.
+			 */
+
+			if (in_mcv_range == IN_MCV_RANGE_NO)
+				continue;
+
+			else if (in_mcv_range == IN_MCV_RANGE_YES)
+			{
+				if (lBound <= i && i <= rBound)
+					mcv_selec += sslot.numbers[i];
+
+				continue;
+			}
+
+			if (MCV_ENTRY_MATCH(fcinfo, arg_mcv, sslot, i, fresult))
 				mcv_selec += sslot.numbers[i];
-			sumcommon += sslot.numbers[i];
 		}
+
 		free_attstatsslot(&sslot);
 	}
 
@@ -1032,7 +1579,7 @@ generic_restriction_selectivity(PlannerInfo *root, Oid oproid, Oid collation,
 		 */
 		mcvsel = mcv_selectivity(&vardata, &opproc, collation,
 								 constval, varonleft,
-								 &mcvsum);
+								 &mcvsum, oproid);
 
 		/*
 		 * If the histogram is large enough, see what fraction of it matches
@@ -1277,9 +1824,9 @@ ineq_histogram_selectivity(PlannerInfo *root,
 															 &isdefault);
 
 					/* Subtract off the number of known MCVs */
-					if (get_attstatsslot(&mcvslot, vardata->statsTuple,
-										 STATISTIC_KIND_MCV, InvalidOid,
-										 ATTSTATSSLOT_NUMBERS))
+					if (get_attstatsslot_mcv(&mcvslot, vardata->statsTuple,
+											 InvalidOid,
+											 ATTSTATSSLOT_NUMBERS))
 					{
 						otherdistinct -= mcvslot.nnumbers;
 						free_attstatsslot(&mcvslot);
@@ -1641,9 +2188,9 @@ booltestsel(PlannerInfo *root, BoolTestType booltesttype, Node *arg,
 		stats = (Form_pg_statistic) GETSTRUCT(vardata.statsTuple);
 		freq_null = stats->stanullfrac;
 
-		if (get_attstatsslot(&sslot, vardata.statsTuple,
-							 STATISTIC_KIND_MCV, InvalidOid,
-							 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS)
+		if (get_attstatsslot_mcv(&sslot, vardata.statsTuple,
+								 InvalidOid,
+								 ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS)
 			&& sslot.nnumbers > 0)
 		{
 			double		freq_true;
@@ -2420,6 +2967,8 @@ eqjoinsel(PG_FUNCTION_ARGS)
 	bool		get_mcv_stats;
 	bool		join_is_reversed;
 	RelOptInfo *inner_rel;
+	int			statskind1;
+	int			statskind2;
 
 	get_join_variables(root, args, sjinfo,
 					   &vardata1, &vardata2, &join_is_reversed);
@@ -2438,12 +2987,12 @@ eqjoinsel(PG_FUNCTION_ARGS)
 	 */
 	get_mcv_stats = (HeapTupleIsValid(vardata1.statsTuple) &&
 					 HeapTupleIsValid(vardata2.statsTuple) &&
-					 get_attstatsslot(&sslot1, vardata1.statsTuple,
-									  STATISTIC_KIND_MCV, InvalidOid,
-									  0) &&
-					 get_attstatsslot(&sslot2, vardata2.statsTuple,
-									  STATISTIC_KIND_MCV, InvalidOid,
-									  0));
+					 get_attstatsslot_mcv(&sslot1, vardata1.statsTuple,
+										  InvalidOid,
+										  0) &&
+					 get_attstatsslot_mcv(&sslot2, vardata2.statsTuple,
+										  InvalidOid,
+										  0));
 
 	if (HeapTupleIsValid(vardata1.statsTuple))
 	{
@@ -2451,9 +3000,9 @@ eqjoinsel(PG_FUNCTION_ARGS)
 		stats1 = (Form_pg_statistic) GETSTRUCT(vardata1.statsTuple);
 		if (get_mcv_stats &&
 			statistic_proc_security_check(&vardata1, opfuncoid))
-			have_mcvs1 = get_attstatsslot(&sslot1, vardata1.statsTuple,
-										  STATISTIC_KIND_MCV, InvalidOid,
-										  ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS);
+			have_mcvs1 = (statskind1 = get_attstatsslot_mcv(&sslot1, vardata1.statsTuple,
+															InvalidOid,
+															ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS));
 	}
 
 	if (HeapTupleIsValid(vardata2.statsTuple))
@@ -2462,9 +3011,9 @@ eqjoinsel(PG_FUNCTION_ARGS)
 		stats2 = (Form_pg_statistic) GETSTRUCT(vardata2.statsTuple);
 		if (get_mcv_stats &&
 			statistic_proc_security_check(&vardata2, opfuncoid))
-			have_mcvs2 = get_attstatsslot(&sslot2, vardata2.statsTuple,
-										  STATISTIC_KIND_MCV, InvalidOid,
-										  ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS);
+			have_mcvs2 = (statskind2 = get_attstatsslot_mcv(&sslot2, vardata2.statsTuple,
+															InvalidOid,
+															ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS));
 	}
 
 	/* Prepare info usable by both eqjoinsel_inner and eqjoinsel_semi */
@@ -4431,6 +4980,7 @@ estimate_hash_bucket_stats(PlannerInfo *root, Node *hashkey, double nbuckets,
 				ndistinct;
 	bool		isdefault;
 	AttStatsSlot sslot;
+	int			statskind;
 
 	examine_variable(root, hashkey, 0, &vardata);
 
@@ -4440,15 +4990,16 @@ estimate_hash_bucket_stats(PlannerInfo *root, Node *hashkey, double nbuckets,
 	/* Look up the frequency of the most common value, if available */
 	if (HeapTupleIsValid(vardata.statsTuple))
 	{
-		if (get_attstatsslot(&sslot, vardata.statsTuple,
-							 STATISTIC_KIND_MCV, InvalidOid,
-							 ATTSTATSSLOT_NUMBERS))
+		statskind = get_attstatsslot_mcv(&sslot, vardata.statsTuple,
+										 InvalidOid,
+										 ATTSTATSSLOT_NUMBERS);
+		if (statskind)
 		{
 			/*
-			 * The first MCV stat is for the most common value.
+			 * get the most common value.
 			 */
 			if (sslot.nnumbers > 0)
-				*mcv_freq = sslot.numbers[0];
+				*mcv_freq = max_mcv_numbers(&sslot, statskind);
 			free_attstatsslot(&sslot);
 		}
 		else if (get_attstatsslot(&sslot, vardata.statsTuple,
@@ -6932,10 +7483,10 @@ get_variable_range(PlannerInfo *root, VariableStatData *vardata,
 	 * data.  Proceed only if the MCVs represent the whole table (to within
 	 * roundoff error).
 	 */
-	if (get_attstatsslot(&sslot, vardata->statsTuple,
-						 STATISTIC_KIND_MCV, InvalidOid,
-						 have_data ? ATTSTATSSLOT_VALUES :
-						 (ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS)))
+	if (get_attstatsslot_mcv(&sslot, vardata->statsTuple,
+							 InvalidOid,
+							 have_data ? ATTSTATSSLOT_VALUES :
+							 (ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS)))
 	{
 		bool		use_mcvs = have_data;
 
