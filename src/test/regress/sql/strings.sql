@@ -957,6 +957,26 @@ SELECT get_byte('\x1234567890abcdef00'::bytea, 3);
 SELECT get_byte('\x1234567890abcdef00'::bytea, 99);  -- error
 SELECT set_byte('\x1234567890abcdef00'::bytea, 7, 11);
 SELECT set_byte('\x1234567890abcdef00'::bytea, 99, 11);  -- error
+SELECT set_byte('\x1234567890abcdef00'::bytea, 0, 256);  -- error
+SELECT set_byte('\x1234567890abcdef00'::bytea, 0, -1);  -- error
+SELECT set_byte('\x01020304'::bytea, 1, 255, 1);
+SELECT set_byte('\x01020304'::bytea, 1, 255, 2);
+SELECT set_byte('\x01020304'::bytea, 0, 255, 2);
+SELECT set_byte('\x01020304'::bytea, 2, 0, 2);
+SELECT set_byte('\x01020304'::bytea, 0, 0, 4);
+SELECT set_byte('\x01020304'::bytea, 1, 255, 0);
+SELECT set_byte('\x01020304'::bytea, 4, 0, 0);
+SELECT set_byte('\x'::bytea, 0, 0, 0);
+SELECT set_byte('\x01020304'::bytea, 0, 0, -1);  -- error
+SELECT set_byte('\x01020304'::bytea, -1, 0, 1);  -- error
+SELECT set_byte('\x01020304'::bytea, 5, 0, 0);  -- error
+SELECT set_byte('\x01020304'::bytea, 4, 0, 1);  -- error
+SELECT set_byte('\x01020304'::bytea, 3, 0, 2);  -- error
+SELECT set_byte('\x01020304'::bytea, 0, 0, 2147483647);  -- error
+SELECT set_byte('\x01020304'::bytea, 3, 0, 2147483647);  -- error, end overflows int32
+SELECT set_byte('\x01020304'::bytea, 0, 256, 0);  -- error, newvalue checked when count is 0
+SELECT set_byte('\x01020304'::bytea, 0, -1, 1);  -- error
+SELECT set_byte('\x01020304'::bytea, 0, 256, 1);  -- error
 
 --
 -- conversions between bytea and integer types
