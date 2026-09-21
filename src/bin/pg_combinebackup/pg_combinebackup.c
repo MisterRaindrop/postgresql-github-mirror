@@ -1164,6 +1164,9 @@ process_directory_recursively(Oid tsoid,
 			pg_free(checksum_payload);
 	}
 
+	if (errno)
+		pg_fatal("could not read directory \"%s\": %m", ifulldir);
+
 	closedir(dir);
 }
 
@@ -1328,6 +1331,9 @@ scan_for_existing_tablespaces(char *pathname, cb_options *opt)
 		ts->next = tslist;
 		tslist = ts;
 	}
+
+	if (errno)
+		pg_fatal("could not read directory \"%s\": %m", pg_tblspc);
 
 	if (closedir(dir) != 0)
 		pg_fatal("could not close directory \"%s\": %m", pg_tblspc);

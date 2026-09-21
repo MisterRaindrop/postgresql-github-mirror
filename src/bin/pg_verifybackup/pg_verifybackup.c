@@ -670,6 +670,14 @@ verify_plain_backup_directory(verifier_context *context, char *relpath,
 		pfree(newrelpath);
 	}
 
+	if (errno)
+	{
+		report_backup_error(context,
+							"could not read directory \"%s\": %m", fullpath);
+		if (relpath != NULL)
+			simple_string_list_append(&context->ignore_list, relpath);
+	}
+
 	if (closedir(dir))
 	{
 		report_backup_error(context,
@@ -841,6 +849,11 @@ verify_tar_backup(verifier_context *context, DIR *dir, char **base_archive_path,
 			pfree(fullpath);
 		}
 	}
+
+	if (errno)
+		report_backup_error(context,
+							"could not read directory \"%s\": %m",
+							context->backup_directory);
 
 	if (closedir(dir))
 	{
