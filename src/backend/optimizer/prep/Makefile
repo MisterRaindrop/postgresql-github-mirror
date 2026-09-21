@@ -14,6 +14,7 @@ include $(top_builddir)/src/Makefile.global
 
 OBJS = \
 	prepagg.o \
+	prepfulljoin.o \
 	prepjointree.o \
 	prepqual.o \
 	preptlist.o \

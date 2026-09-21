@@ -891,6 +891,13 @@
   boot_val => 'true',
 },
 
+{ name => 'enable_full_join_rewrite', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
+  short_desc => 'Rewrites eligible full joins as left and anti joins with UNION ALL.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'enable_full_join_rewrite',
+  boot_val => 'false',
+},
+
 { name => 'enable_gathermerge', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
   short_desc => 'Enables the planner\'s use of gather merge plans.',
   flags => 'GUC_EXPLAIN',

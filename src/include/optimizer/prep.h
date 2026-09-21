@@ -17,6 +17,9 @@
 #include "nodes/pathnodes.h"
 #include "nodes/plannodes.h"
 
+/* prototypes for prepfulljoin.c */
+extern Query *rewrite_full_joins(Query *parse);
+
 
 /*
  * prototypes for prepjointree.c
