@@ -437,6 +437,21 @@ set_pglocale_pgservice(const char *argv0, const char *app)
 	{
 		setlocale(LC_ALL, "");
 
+#ifdef WIN32
+		/*
+		 * Unlike POSIX implementations, the Windows CRT does not honor
+		 * LC_NUMERIC from the environment when setlocale() is called with
+		 * an empty locale name.  Apply an explicitly specified LC_NUMERIC
+		 * setting separately.
+		 */
+		{
+			const char *lc_numeric = getenv("LC_NUMERIC");
+
+			if (lc_numeric != NULL && lc_numeric[0] != '\0')
+				setlocale(LC_NUMERIC, lc_numeric);
+		}
+#endif
+
 		/*
 		 * One could make a case for reproducing here PostmasterMain()'s test
 		 * for whether the process is multithreaded.  Unlike the postmaster,
