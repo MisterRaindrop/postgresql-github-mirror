@@ -794,8 +794,9 @@ pull_up_sublinks_jointree_recurse(PlannerInfo *root, Node *jtnode,
 		 * point of the available_rels machinations is to ensure that we only
 		 * pull up quals for which that's okay.
 		 *
-		 * We don't expect to see any pre-existing JOIN_SEMI, JOIN_ANTI,
+		 * We don't expect to see any pre-existing JOIN_SEMI,
 		 * JOIN_RIGHT_SEMI, or JOIN_RIGHT_ANTI jointypes here.
+		 * FULL join decomposition can introduce JOIN_ANTI before this pass.
 		 */
 		switch (j->jointype)
 		{
@@ -813,7 +814,8 @@ pull_up_sublinks_jointree_recurse(PlannerInfo *root, Node *jtnode,
 														 NULL, NULL);
 				break;
 			case JOIN_FULL:
-				/* can't do anything with full-join quals */
+			case JOIN_ANTI:
+				/* Leave full/anti join SubLinks to expression preprocessing. */
 				break;
 			case JOIN_RIGHT:
 				j->quals = pull_up_sublinks_qual_recurse(root, j->quals,
