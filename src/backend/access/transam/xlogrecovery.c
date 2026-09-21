@@ -96,6 +96,7 @@ TimestampTz recoveryTargetTime;
 char	   *recoveryTargetName;
 XLogRecPtr	recoveryTargetLSN;
 int			recovery_min_apply_delay = 0;
+int			streaming_replication_retry_interval = 0;
 
 /* options formerly taken from recovery.conf for XLOG streaming */
 char	   *PrimaryConnInfo = NULL;
@@ -251,6 +252,8 @@ static XLogSource readSource = XLOG_FROM_ANY;
 static XLogSource currentSource = XLOG_FROM_ANY;
 static bool lastSourceFailed = false;
 static bool pendingWalRcvRestart = false;
+static bool switchToStreamingPending = false;
+static TimestampTz switched_to_archive_at = 0;
 
 /*
  * These variables track when we last obtained some WAL data to process,
@@ -386,6 +389,7 @@ static bool rescanLatestTimeLine(TimeLineID replayTLI, XLogRecPtr replayLSN);
 static int	XLogFileRead(XLogSegNo segno, TimeLineID tli,
 						 XLogSource source, bool notfoundOk);
 static int	XLogFileReadAnyTLI(XLogSegNo segno, XLogSource source);
+static bool ShouldSwitchWALSourceToStreaming(void);
 
 static bool CheckForStandbyTrigger(void);
 static void SetPromoteIsTriggered(void);
@@ -3555,6 +3559,7 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 	static TimestampTz last_fail_time = 0;
 	TimestampTz now;
 	bool		streaming_reply_sent = false;
+	XLogSource	readFrom;
 
 	/*-------
 	 * Standby mode is implemented by a state machine:
@@ -3602,6 +3607,9 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 		 * happened outside this function, e.g when a CRC check fails on a
 		 * record, or within this loop.
 		 */
+		if (streaming_replication_retry_interval <= 0)
+			switchToStreamingPending = false;
+
 		if (lastSourceFailed)
 		{
 			/*
@@ -3760,9 +3768,22 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 		}
 
 		if (currentSource != oldSource)
-			elog(DEBUG2, "switched WAL source from %s to %s after %s",
+		{
+			if (currentSource == XLOG_FROM_ARCHIVE)
+				switched_to_archive_at = GetCurrentTimestamp();
+
+			elog(DEBUG1, "switched WAL source from %s to %s after %s",
 				 xlogSourceNames[oldSource], xlogSourceNames[currentSource],
+				 switchToStreamingPending ? "timeout" :
 				 lastSourceFailed ? "failure" : "success");
+
+			if (switchToStreamingPending)
+			{
+				Assert(oldSource == XLOG_FROM_ARCHIVE);
+				Assert(currentSource == XLOG_FROM_STREAM);
+				switchToStreamingPending = false;
+			}
+		}
 
 		/*
 		 * We've now handled possible failure. Try to read from the chosen
@@ -3791,13 +3812,24 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 				if (randAccess)
 					curFileTLI = 0;
 
+				if (!switchToStreamingPending)
+					switchToStreamingPending = ShouldSwitchWALSourceToStreaming();
+
 				/*
 				 * Try to restore the file from archive, or read an existing
-				 * file from pg_wal.
+				 * file from pg_wal.  Before switching to streaming, consume
+				 * all WAL already present in pg_wal.
 				 */
-				readFile = XLogFileReadAnyTLI(readSegNo,
-											  currentSource == XLOG_FROM_ARCHIVE ? XLOG_FROM_ANY :
-											  currentSource);
+				if (switchToStreamingPending)
+				{
+					Assert(currentSource == XLOG_FROM_ARCHIVE);
+					readFrom = XLOG_FROM_PG_WAL;
+				}
+				else
+					readFrom = currentSource == XLOG_FROM_ARCHIVE ?
+						XLOG_FROM_ANY : currentSource;
+
+				readFile = XLogFileReadAnyTLI(readSegNo, readFrom);
 				if (readFile >= 0)
 					return XLREAD_SUCCESS;	/* success! */
 
@@ -4032,6 +4064,33 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 	}
 
 	return XLREAD_FAIL;			/* not reached */
+}
+
+/*
+ * Check whether the standby should try streaming after spending the
+ * configured amount of time reading from the archive.
+ */
+static bool
+ShouldSwitchWALSourceToStreaming(void)
+{
+	TimestampTz now;
+
+	if (streaming_replication_retry_interval <= 0 ||
+		!StandbyMode || currentSource != XLOG_FROM_ARCHIVE)
+		return false;
+
+	now = GetCurrentTimestamp();
+	if (switched_to_archive_at == 0)
+	{
+		switched_to_archive_at = now;
+		return false;
+	}
+
+	if (TimestampDifferenceExceedsSeconds(switched_to_archive_at, now,
+										 streaming_replication_retry_interval))
+		return true;
+
+	return false;
 }
 
 

@@ -5612,6 +5612,34 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
       </listitem>
      </varlistentry>
 
+      <varlistentry id="guc-streaming-replication-retry-interval" xreflabel="streaming_replication_retry_interval">
+       <term><varname>streaming_replication_retry_interval</varname> (<type>integer</type>)
+       <indexterm>
+        <primary><varname>streaming_replication_retry_interval</varname> configuration parameter</primary>
+       </indexterm>
+       </term>
+       <listitem>
+        <para>
+         Specifies how long a standby should read WAL from the archive before
+         attempting to switch to streaming replication.  Before switching, the
+         standby consumes all WAL already present in
+         <filename>pg_wal</filename>.  If streaming cannot be started, the
+         standby returns to archive recovery.  If this value is specified
+         without units, it is taken as seconds.  The default is zero, which
+         disables this feature.  This parameter can only be set in the
+         <filename>postgresql.conf</filename> file or on the server command
+         line.
+        </para>
+        <note>
+         <para>
+          A switch attempt might occur later than the configured interval.  For
+          example, recovery finishes processing the current WAL segment before
+          checking whether the interval has elapsed.
+         </para>
+        </note>
+       </listitem>
+      </varlistentry>
+
      <varlistentry id="guc-recovery-min-apply-delay" xreflabel="recovery_min_apply_delay">
       <term><varname>recovery_min_apply_delay</varname> (<type>integer</type>)
       <indexterm>
