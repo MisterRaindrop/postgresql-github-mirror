@@ -15,6 +15,7 @@
 #define VISIBILITYMAP_H
 
 #include "access/visibilitymapdefs.h"
+#include "access/xlogdefs.h"
 #include "storage/block.h"
 #include "storage/buf.h"
 #include "storage/relfilelocator.h"
@@ -28,6 +29,8 @@
 
 extern bool visibilitymap_clear(RelFileLocator rlocator, BlockNumber heapBlk,
 								Buffer vmbuf, uint8 flags);
+extern uint8 xlog_visibilitymap_get_status(RelFileLocator rlocator,
+										   BlockNumber heapBlk, Buffer *vmbuf);
 extern void visibilitymap_pin(Relation rel, BlockNumber heapBlk,
 							  Buffer *vmbuf);
 extern bool visibilitymap_pin_ok(BlockNumber heapBlk, Buffer vmbuf);

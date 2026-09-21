@@ -19,8 +19,55 @@
 #include "access/visibilitymap.h"
 #include "access/xlog.h"
 #include "access/xlogutils.h"
+#include "common/relpath.h"
 #include "storage/freespace.h"
 #include "storage/standby.h"
+
+/*
+ * Clear visibility map bits for a heap block whose PD_ALL_VISIBLE flag the
+ * record being replayed cleared, but whose VM page the record did not
+ * register.
+ *
+ * The VM page is only registered if clearing the bits changed it, so the bits
+ * were already clear when the record was generated. They should be clear here
+ * too, since the VM is replicated through WAL. But the VM can be out of sync
+ * across a cluster (for instance, CREATE DATABASE STRATEGY WAL_LOG
+ * historically could produce out-of-sync VMs). It's incorrect for
+ * PD_ALL_VISIBLE to be clear and the VM to be set, so we must fix it.
+ *
+ * This is not fully resilient: the VM page is modified without a full-page
+ * image, so a torn write during a crash could leave it inconsistent until the
+ * page is next repaired. That is considered acceptable since this is an edge
+ * case in which we already have data corruption.
+ */
+static void
+heap_xlog_vm_clear_unregistered(RelFileLocator rlocator,
+								BlockNumber heap_blkno,
+								uint8 flags, XLogRecPtr lsn)
+{
+	Buffer		vmbuffer = InvalidBuffer;
+
+	/*
+	 * Read the VM page without extending the fork; a page that does not exist
+	 * has no bits to clear.  If the bits are already clear (the consistent
+	 * case) there is nothing to do.
+	 */
+	if (xlog_visibilitymap_get_status(rlocator, heap_blkno, &vmbuffer) & flags)
+	{
+		LockBuffer(vmbuffer, BUFFER_LOCK_EXCLUSIVE);
+		if (visibilitymap_clear(rlocator, heap_blkno, vmbuffer, flags))
+		{
+			PageSetLSN(BufferGetPage(vmbuffer), lsn);
+			ereport(WARNING,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("clearing out-of-sync visibility map bits for page %u of relation %s",
+							heap_blkno, relpathperm(rlocator, MAIN_FORKNUM).str)));
+		}
+		UnlockReleaseBuffer(vmbuffer);
+	}
+	else if (BufferIsValid(vmbuffer))
+		ReleaseBuffer(vmbuffer);
+}
 
 /*
  * Clear visibility map bits for a single heap block during heap redo.
@@ -46,7 +93,11 @@ heap_xlog_vm_clear(XLogReaderState *record,
 	Buffer		vmbuffer = InvalidBuffer;
 
 	if (!XLogRecHasBlockRef(record, wal_vm_block_id))
+	{
+		heap_xlog_vm_clear_unregistered(target_locator, heap_blkno, flags,
+										lsn);
 		return;
+	}
 
 	/*
 	 * If the vmbuffer was registered, use the recovery-specific routines to
@@ -741,6 +792,7 @@ heap_xlog_update(XLogReaderState *record, bool hot_update)
 				npage;
 	bool		has_vm_old,
 				has_vm_new;
+	bool		old_vm_cleared_via_new = false;
 	OffsetNumber offnum;
 	ItemId		lp;
 	HeapTupleData oldtup;
@@ -819,8 +871,29 @@ heap_xlog_update(XLogReaderState *record, bool hot_update)
 				PageSetLSN(BufferGetPage(vmbuffer_new), lsn);
 		}
 		if (BufferIsValid(vmbuffer_new))
+		{
+			/*
+			 * Remember whether oldblk's VM bits live on this page. If so,
+			 * they are now up to date, whether we cleared them above or the
+			 * page had already been replayed past this record.
+			 */
+			old_vm_cleared_via_new =
+				(xlrec->flags & XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) &&
+				visibilitymap_pin_ok(oldblk, vmbuffer_new);
 			UnlockReleaseBuffer(vmbuffer_new);
+		}
 	}
+	else if (xlrec->flags & XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED)
+	{
+		/*
+		 * If PD_ALL_VISIBLE was cleared on the new heap page and its
+		 * corresponding VM page was not registered, ensure it is already
+		 * clear or clear it.
+		 */
+		heap_xlog_vm_clear_unregistered(rlocator, newblk,
+										VISIBILITYMAP_VALID_BITS, lsn);
+	}
+
 	if (has_vm_old)
 	{
 		Buffer		vmbuffer_old = InvalidBuffer;
@@ -836,6 +909,22 @@ heap_xlog_update(XLogReaderState *record, bool hot_update)
 		}
 		if (BufferIsValid(vmbuffer_old))
 			UnlockReleaseBuffer(vmbuffer_old);
+	}
+	else if ((xlrec->flags & XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) &&
+			 !old_vm_cleared_via_new)
+	{
+		/*
+		 * VM_OLD is omitted when clearing the old page's VM bit was a no-op
+		 * when the record was generated, because the bit was already clear.
+		 * We get here in two such cases: either no VM_NEW was registered, or
+		 * VM_NEW was registered but covers a different VM page than oldblk
+		 * (the old and new heap pages map to different VM pages).
+		 *
+		 * If the VM has diverged on the standby, the bit may be set here, so
+		 * clear it defensively.
+		 */
+		heap_xlog_vm_clear_unregistered(rlocator, oldblk,
+										VISIBILITYMAP_VALID_BITS, lsn);
 	}
 
 	/*
