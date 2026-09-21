@@ -5930,9 +5930,26 @@ BufferLockAcquire(Buffer buffer, BufferDesc *buf_hdr, BufferLockMode mode)
 	entry = GetPrivateRefCountEntry(buffer, true);
 
 	/*
-	 * We better not already hold a lock on the buffer.
+	 * We must not already hold a lock on this buffer.  Only one lock
+	 * acquisition per buffer per backend can be tracked, as
+	 * PrivateRefCountData has room for a single lockmode; see also the
+	 * comment in BufferLockConditional(), which fails rather than acquire a
+	 * second lock.
+	 *
+	 * Were we to proceed, BufferLockAttempt() below would add another
+	 * lock-value to buf_hdr->state, but the assignment of
+	 * entry->data.lockmode further down would overwrite the record of the
+	 * lock we already hold.  The eventual release would then subtract only
+	 * one lock-value, permanently leaving the buffer's lock state too high,
+	 * so that the buffer could never again be locked exclusively.  Error
+	 * recovery would not save us either, as ResOwnerReleaseBuffer() likewise
+	 * releases at most one lock per buffer.
+	 *
+	 * Leaking a content lock that way is unrecoverable and hard to diagnose,
+	 * so refuse to do it even in non-assert builds.
 	 */
-	Assert(entry->data.lockmode == BUFFER_LOCK_UNLOCK);
+	if (unlikely(entry->data.lockmode != BUFFER_LOCK_UNLOCK))
+		elog(ERROR, "buffer %d is already locked by this backend", buffer);
 
 	/*
 	 * Lock out cancel/die interrupts until we exit the code section protected
