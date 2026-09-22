@@ -285,6 +285,17 @@ get_and_validate_seq_info(TupleTableSlot *slot, Relation *sequence_rel,
 	*seqidx = DatumGetInt32(slot_getattr(slot, ++col, &isnull));
 	Assert(!isnull);
 
+	/*
+	 * The publisher only echoes back an index that we put in the VALUES list,
+	 * so this should always identify an entry of seqinfos. Check it anyway
+	 * before using it as a list subscript, since list_nth() does not
+	 * bounds-check outside assert-enabled builds and we would then write the
+	 * remote sequence state through a pointer fetched from beyond the list.
+	 */
+	if (*seqidx < 0 || *seqidx >= list_length(seqinfos))
+		elog(ERROR, "invalid sequence index %d received from the publisher",
+			 *seqidx);
+
 	/* Identify the corresponding local sequence for the given index. */
 	*seqinfo = seqinfo_local =
 		(LogicalRepSequenceInfo *) list_nth(seqinfos, *seqidx);
