@@ -70,6 +70,15 @@ SELECT * FROM pt1, pt2, pt3 WHERE pt1.id = pt2.id AND pt2.id = pt3.id
    AND val1 = 1 AND val2 = 1 AND val3 = 1;
 COMMIT;
 
+-- PARTITIONWISE advice on a table without children is vacuous.
+CREATE TABLE ptplain (id integer);
+BEGIN;
+SET LOCAL pg_plan_advice.advice = 'PARTITIONWISE(ptplain)';
+EXPLAIN (PLAN_ADVICE, COSTS OFF) SELECT * FROM ptplain;
+SET LOCAL pg_plan_advice.advice = 'PARTITIONWISE((ptplain))';
+EXPLAIN (PLAN_ADVICE, COSTS OFF) SELECT * FROM ptplain;
+COMMIT;
+
 -- Test conflicting advice.
 BEGIN;
 SET LOCAL pg_plan_advice.advice = 'PARTITIONWISE((pt1 pt2) (pt1 pt3))';

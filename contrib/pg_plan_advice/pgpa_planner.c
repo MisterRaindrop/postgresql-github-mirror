@@ -131,7 +131,7 @@ static void pgpa_planner_apply_join_path_advice(JoinType jointype,
 												uint64 *pgs_mask_p,
 												char *plan_name,
 												pgpa_join_state *pjs);
-static void pgpa_planner_apply_scan_advice(RelOptInfo *rel,
+static void pgpa_planner_apply_scan_advice(RelOptInfo *rel, bool inh,
 										   pgpa_trove_entry *scan_entries,
 										   Bitmapset *scan_indexes,
 										   pgpa_trove_entry *rel_entries,
@@ -438,7 +438,7 @@ pgpa_build_simple_rel(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 		{
 			uint64		original_mask = rel->pgs_mask;
 
-			pgpa_planner_apply_scan_advice(rel,
+			pgpa_planner_apply_scan_advice(rel, rte->inh,
 										   tresult_scan.entries,
 										   tresult_scan.indexes,
 										   tresult_rel.entries,
@@ -1623,7 +1623,7 @@ pgpa_semijoin_permits_join(int outer_count, int inner_count,
  * Apply scan advice to a RelOptInfo.
  */
 static void
-pgpa_planner_apply_scan_advice(RelOptInfo *rel,
+pgpa_planner_apply_scan_advice(RelOptInfo *rel, bool inh,
 							   pgpa_trove_entry *scan_entries,
 							   Bitmapset *scan_indexes,
 							   pgpa_trove_entry *rel_entries,
@@ -1716,11 +1716,16 @@ pgpa_planner_apply_scan_advice(RelOptInfo *rel,
 
 		/*
 		 * PARTITIONWISE behaves like a scan type, except that if there's more
-		 * than one relation targeted, it has no effect at this level.
+		 * than one relation targeted, it has no effect at this level. If the
+		 * relation has no children, this advice is vacuous and should not
+		 * restrict the scan type.
 		 */
 		if (my_entry->tag == PGPA_TAG_PARTITIONWISE)
 		{
-			if (just_one_rel)
+			if (just_one_rel && !inh)
+				scan_type_rel_indexes =
+					bms_add_member(scan_type_rel_indexes, i);
+			else if (just_one_rel)
 			{
 				const uint64 my_scan_type = PGS_APPEND | PGS_MERGE_APPEND;
 
