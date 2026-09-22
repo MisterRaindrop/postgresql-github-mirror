@@ -119,6 +119,46 @@ pass('multiple_unique_conflicts detected during update');
 # Truncate table to get rid of the error
 $node_subscriber->safe_psql('postgres', "TRUNCATE conf_tab;");
 
+##################################################
+# Test conflict detection at SERIALIZABLE
+##################################################
+
+# The apply worker runs its transactions at the subscriber's default
+# isolation level.  Make that serializable, and restart the worker so that
+# it picks up the new setting.
+$node_subscriber->safe_psql('postgres',
+	"ALTER DATABASE postgres SET default_transaction_isolation = 'serializable'"
+);
+$node_subscriber->safe_psql('postgres', "ALTER SUBSCRIPTION sub_tab DISABLE");
+$node_subscriber->poll_query_until('postgres',
+	"SELECT count(*) = 0 FROM pg_stat_activity WHERE backend_type = 'logical replication apply worker'"
+);
+$node_subscriber->safe_psql('postgres', "ALTER SUBSCRIPTION sub_tab ENABLE");
+
+$log_offset = -s $node_subscriber->logfile;
+
+# Insert data in the subscriber table
+$node_subscriber->safe_psql('postgres',
+	"INSERT INTO conf_tab VALUES (9,9,9);");
+
+# Insert a row with the same key in the publisher table
+$node_publisher->safe_psql('postgres',
+	"INSERT INTO conf_tab VALUES (9,10,11);");
+
+# Confirm that this causes an error on the subscriber
+$node_subscriber->wait_for_log(
+	qr/conflict detected on relation \"public.conf_tab\": conflict=insert_exists.*
+.*Could not apply remote change: remote row \(9, 10, 11\).*
+.*Key already exists in unique index \"conf_tab_pkey\", modified in transaction .*: key \(a\)=\(9\), local row \(9, 9, 9\)./,
+	$log_offset);
+
+pass('insert_exists detected at serializable isolation');
+
+# Truncate table to get rid of the error, and restore the default isolation
+# level
+$node_subscriber->safe_psql('postgres', "TRUNCATE conf_tab;");
+$node_subscriber->safe_psql('postgres',
+	"ALTER DATABASE postgres RESET default_transaction_isolation");
 
 ##################################################
 # Test multiple_unique_conflicts due to INSERT on a leaf partition
