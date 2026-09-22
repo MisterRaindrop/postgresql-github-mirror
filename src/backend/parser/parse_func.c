@@ -95,6 +95,7 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 	bool		is_column = (fn == NULL);
 	List	   *agg_order = (fn ? fn->agg_order : NIL);
 	Expr	   *agg_filter = NULL;
+	Expr	   *agg_on_empty = NULL;
 	WindowDef  *over = (fn ? fn->over : NULL);
 	bool		agg_within_group = (fn ? fn->agg_within_group : false);
 	bool		agg_star = (fn ? fn->agg_star : false);
@@ -129,6 +130,16 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 		agg_filter = (Expr *) transformWhereClause(pstate, fn->agg_filter,
 												   EXPR_KIND_FILTER,
 												   "FILTER");
+
+	/*
+	 * Likewise transform the ON EMPTY default expression, if any.  This is
+	 * a minimal implementation: it is only accepted for sum() and product(),
+	 * for which the standard defines it, and is implemented as a rewrite to
+	 * COALESCE(call, default) below, once we know this is such a call.
+	 */
+	if (fn && fn->agg_on_empty != NULL)
+		agg_on_empty = (Expr *) transformExpr(pstate, fn->agg_on_empty,
+											  EXPR_KIND_FUNCTION_DEFAULT);
 
 	/*
 	 * Most of the rest of the parser just assumes that functions do not have
@@ -343,6 +354,12 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 			ereport(ERROR,
 					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 					 errmsg("FILTER specified, but %s is not an aggregate function",
+							NameListToString(funcname)),
+					 parser_errposition(pstate, location)));
+		if (agg_on_empty != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("ON EMPTY specified, but %s is not an aggregate function",
 							NameListToString(funcname)),
 					 parser_errposition(pstate, location)));
 		if (over)
@@ -879,6 +896,51 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 		transformAggregateCall(pstate, aggref, fargs, agg_order, agg_distinct);
 
 		retval = (Node *) aggref;
+
+		if (agg_on_empty != NULL)
+		{
+			char	   *aggname = strVal(llast(funcname));
+			CoalesceExpr *c;
+			Node	   *coerced;
+
+			/*
+			 * Minimal ON EMPTY: only support it for the two aggregates the
+			 * SQL standard actually defines it for (with a fixed identity
+			 * value, per the standard, though we don't enforce the value
+			 * here), and implement it as a straight rewrite to COALESCE.
+			 * No new node fields, no executor changes, no interaction with
+			 * DISTINCT/ALL/parallel aggregation/planagg.c to worry about.
+			 */
+			if (strcmp(aggname, "sum") != 0 && strcmp(aggname, "product") != 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("ON EMPTY is only supported for sum() and product()"),
+						 parser_errposition(pstate, location)));
+
+			coerced = coerce_to_target_type(pstate,
+											(Node *) agg_on_empty,
+											exprType((Node *) agg_on_empty),
+											aggref->aggtype,
+											-1,
+											COERCION_ASSIGNMENT,
+											COERCE_IMPLICIT_CAST,
+											-1);
+			if (coerced == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATATYPE_MISMATCH),
+						 errmsg("ON EMPTY expression type %s cannot be coerced to aggregate result type %s",
+								format_type_be(exprType((Node *) agg_on_empty)),
+								format_type_be(aggref->aggtype)),
+						 parser_errposition(pstate, location)));
+
+			c = makeNode(CoalesceExpr);
+			c->coalescetype = aggref->aggtype;
+			/* coalescecollid will be set by parse_collate.c */
+			c->args = list_make2(aggref, coerced);
+			c->location = location;
+
+			retval = (Node *) c;
+		}
 	}
 	else
 	{
@@ -907,6 +969,17 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("DISTINCT is not implemented for window functions"),
+					 parser_errposition(pstate, location)));
+
+		/*
+		 * This minimal implementation does not support ON EMPTY for window
+		 * function usage (OVER (...)); reject explicitly rather than
+		 * silently ignoring the clause.
+		 */
+		if (agg_on_empty != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("ON EMPTY is not supported for window functions"),
 					 parser_errposition(pstate, location)));
 
 		/*

@@ -3958,3 +3958,68 @@ drop table agg_hash_1;
 drop table agg_hash_2;
 drop table agg_hash_3;
 drop table agg_hash_4;
+-- Minimal ON EMPTY: supported only for sum()/product(), implemented as a
+-- parse-time rewrite to COALESCE(call, default).  No new executor code.
+CREATE TABLE agg_on_empty_min(a int);
+-- empty input
+SELECT sum(a, -1 ON EMPTY) FROM agg_on_empty_min;
+ sum 
+-----
+  -1
+(1 row)
+
+INSERT INTO agg_on_empty_min VALUES (1), (2), (3), (NULL);
+-- non-empty: real result
+SELECT sum(a, -1 ON EMPTY) FROM agg_on_empty_min;
+ sum 
+-----
+   6
+(1 row)
+
+-- non-empty, all-NULL group: same as COALESCE, fires (documented tradeoff)
+SELECT sum(a, -1 ON EMPTY) FROM agg_on_empty_min WHERE a IS NULL;
+ sum 
+-----
+  -1
+(1 row)
+
+-- DISTINCT and ALL work with no special-casing: dedup happens upstream of
+-- the COALESCE rewrite, entirely independent of it
+SELECT sum(DISTINCT a, 0 ON EMPTY) FROM (VALUES (5), (5), (10)) v(a);
+ sum 
+-----
+  15
+(1 row)
+
+SELECT sum(ALL a, -1 ON EMPTY) FROM agg_on_empty_min WHERE a IS NULL;
+ sum 
+-----
+  -1
+(1 row)
+
+-- deparsing shows the COALESCE rewrite, not the original ON EMPTY spelling
+-- (a real limitation of this minimal approach, unlike the general patch)
+CREATE VIEW agg_on_empty_min_vw AS
+  SELECT sum(a, -1 ON EMPTY) FROM agg_on_empty_min;
+SELECT pg_get_viewdef('agg_on_empty_min_vw');
+                      pg_get_viewdef                      
+----------------------------------------------------------
+  SELECT COALESCE(sum(a), ('-1'::integer)::bigint) AS sum+
+    FROM agg_on_empty_min;
+(1 row)
+
+DROP VIEW agg_on_empty_min_vw;
+-- error cases
+SELECT max(a, -1 ON EMPTY) FROM agg_on_empty_min;			-- not sum/product
+ERROR:  ON EMPTY is only supported for sum() and product()
+LINE 1: SELECT max(a, -1 ON EMPTY) FROM agg_on_empty_min;
+               ^
+SELECT length('x', 'y' ON EMPTY);							-- not an aggregate at all
+ERROR:  ON EMPTY specified, but length is not an aggregate function
+LINE 1: SELECT length('x', 'y' ON EMPTY);
+               ^
+SELECT sum(a, -1 ON EMPTY) OVER () FROM agg_on_empty_min;	-- not for window functions
+ERROR:  ON EMPTY is not supported for window functions
+LINE 1: SELECT sum(a, -1 ON EMPTY) OVER () FROM agg_on_empty_min;
+               ^
+DROP TABLE agg_on_empty_min;
