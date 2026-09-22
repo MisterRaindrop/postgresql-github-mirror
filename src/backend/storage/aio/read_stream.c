@@ -1439,6 +1439,9 @@ read_stream_reset(ReadStream *stream)
 {
 	int16		index;
 	Buffer		buffer;
+	uint64		prefetch_count = 0;
+	uint64		distance_sum = 0;
+	int16		distance_max = 0;
 
 	/* Stop looking ahead. */
 	stream->readahead_distance = 0;
@@ -1448,9 +1451,30 @@ read_stream_reset(ReadStream *stream)
 	stream->buffered_blocknum = InvalidBlockNumber;
 	stream->fast_path = false;
 
+	/*
+	 * Draining the stream below is an implementation detail, not consumption
+	 * by the stream's caller.  Preserve the prefetch distance statistics so
+	 * that the drained buffers are not counted as having been returned to the
+	 * caller.  I/O statistics still need to reflect any work done while
+	 * draining.
+	 */
+	if (stream->stats)
+	{
+		prefetch_count = stream->stats->prefetch_count;
+		distance_sum = stream->stats->distance_sum;
+		distance_max = stream->stats->distance_max;
+	}
+
 	/* Unpin anything that wasn't consumed. */
 	while ((buffer = read_stream_next_buffer(stream, NULL)) != InvalidBuffer)
 		ReleaseBuffer(buffer);
+
+	if (stream->stats)
+	{
+		stream->stats->prefetch_count = prefetch_count;
+		stream->stats->distance_sum = distance_sum;
+		stream->stats->distance_max = distance_max;
+	}
 
 	/* Unpin any unused forwarded buffers. */
 	index = stream->next_buffer_index;

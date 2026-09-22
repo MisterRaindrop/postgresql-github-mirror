@@ -20,6 +20,7 @@
 
 #include "access/relation.h"
 #include "catalog/pg_type.h"
+#include "executor/instrument_node.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "storage/aio.h"
@@ -913,6 +914,62 @@ read_stream_for_blocks(PG_FUNCTION_ARGS)
 	relation_close(rel, NoLock);
 
 	return (Datum) 0;
+}
+
+
+PG_FUNCTION_INFO_V1(read_stream_reset_stats);
+Datum
+read_stream_reset_stats(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	ArrayType  *blocksarray = PG_GETARG_ARRAYTYPE_P(1);
+	Relation	rel;
+	BlocksReadStreamData stream_data;
+	ReadStream *stream;
+	IOStats		stats = {0};
+	Buffer		buf;
+	uint64		prefetch_count;
+	uint64		distance_sum;
+	int16		distance_max;
+
+	if (ARR_NDIM(blocksarray) != 1 ||
+		ARR_HASNULL(blocksarray) ||
+		ARR_ELEMTYPE(blocksarray) != INT4OID ||
+		ARR_DIMS(blocksarray)[0] == 0)
+		elog(ERROR, "expected non-empty 1 dimensional int4 array");
+
+	stream_data.curblock = 0;
+	stream_data.nblocks = ARR_DIMS(blocksarray)[0];
+	stream_data.blocks = (uint32 *) ARR_DATA_PTR(blocksarray);
+
+	rel = relation_open(relid, AccessShareLock);
+	stream = read_stream_begin_relation(READ_STREAM_FULL,
+										NULL,
+										rel,
+										MAIN_FORKNUM,
+										read_stream_for_blocks_cb,
+										&stream_data,
+										0);
+	read_stream_enable_stats(stream, &stats);
+
+	buf = read_stream_next_buffer(stream, NULL);
+	if (!BufferIsValid(buf))
+		elog(ERROR, "first read_stream_next_buffer() call is unexpectedly invalid");
+	ReleaseBuffer(buf);
+
+	if (stats.prefetch_count != 1)
+		elog(ERROR, "expected exactly one prefetch sample");
+	prefetch_count = stats.prefetch_count;
+	distance_sum = stats.distance_sum;
+	distance_max = stats.distance_max;
+
+	read_stream_reset(stream);
+	read_stream_end(stream);
+	relation_close(rel, NoLock);
+
+	PG_RETURN_BOOL(stats.prefetch_count == prefetch_count &&
+				   stats.distance_sum == distance_sum &&
+				   stats.distance_max == distance_max);
 }
 
 
