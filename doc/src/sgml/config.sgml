@@ -5969,6 +5969,33 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-enable-full-join-rewrite" xreflabel="enable_full_join_rewrite">
+      <term><varname>enable_full_join_rewrite</varname> (<type>boolean</type>)</term>
+      <listitem>
+       <para>
+        Enables experimental decomposition of eligible full joins into a
+        left outer join and a reversed anti join, combined with
+        <literal>UNION ALL</literal>. The default is <literal>off</literal>.
+        When enabled, this is a rule-based transformation, not a cost-based
+        alternative: both inputs can be scanned twice. At most eight full
+        joins are rewritten per statement.
+       </para>
+       <para>
+        Only read-only <command>SELECT</command> trees are considered.
+        Volatile join conditions and inputs, lateral inputs, CTE references,
+        sampling, row security, security-barrier views, foreign tables,
+        function inputs, domain coercions, unexpanded function defaults, and
+        inputs with row locking, limits, aggregates, distinct clauses, set
+        operations other than <literal>UNION ALL</literal>, window functions
+        or set-returning targets are excluded. Anonymous whole-row record
+        references also prevent rewriting at that query level. Conditions
+        and expressions above the full join are retained above the union.
+        An excluded join follows the normal planner, including its existing
+        restrictions on full-join conditions.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-enable-hashjoin" xreflabel="enable_hashjoin">
       <term><varname>enable_hashjoin</varname> (<type>boolean</type>)
       <indexterm>

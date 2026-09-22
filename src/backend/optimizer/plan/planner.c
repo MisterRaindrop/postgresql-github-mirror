@@ -357,6 +357,9 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 			   *lr,
 			   *lc;
 
+	/* Decompose eligible FULL joins before any planner preprocessing. */
+	parse = rewrite_full_joins(parse);
+
 	/*
 	 * Set up global state for this planner invocation.  This data is needed
 	 * across all levels of sub-Query that might exist in the given command,

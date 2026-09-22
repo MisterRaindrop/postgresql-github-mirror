@@ -2,6 +2,7 @@
 
 backend_sources += files(
   'prepagg.c',
+  'prepfulljoin.c',
   'prepjointree.c',
   'prepqual.c',
   'preptlist.c',
