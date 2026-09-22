@@ -226,10 +226,10 @@ sub ParseHeader
 					$atttype = $RENAME_ATTTYPE{$atttype};
 				}
 
-				# If the C name ends with '[]' or '[digits]', we have
-				# an array type, so we discard that from the name and
-				# prepend '_' to the type.
-				if ($attname =~ /(\w+)\[\d*\]/)
+				# If the C name ends with '[]', we have an array type,
+				# so we discard that from the name and prepend '_' to
+				# the type.
+				if ($attname =~ /(\w+)\[\]/)
 				{
 					$attname = $1;
 					$atttype = '_' . $atttype;
