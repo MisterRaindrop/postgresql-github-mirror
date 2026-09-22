@@ -115,6 +115,22 @@ sub test_repeated_blocks
 }
 
 
+sub test_reset_stats
+{
+	my $io_method = shift;
+	my $node = shift;
+
+	$node->safe_psql('postgres', qq/SELECT evict_rel('largeish');/);
+	is(
+		$node->safe_psql(
+			'postgres',
+			qq/SELECT read_stream_reset_stats('largeish', ARRAY[0, 1, 2, 3]);/),
+		't',
+		"$io_method: resetting a stream preserves consumer prefetch statistics"
+	);
+}
+
+
 sub test_inject_foreign
 {
 	my $io_method = shift;
@@ -267,6 +283,7 @@ sub test_io_method
 	is($node->safe_psql('postgres', 'SHOW io_method'),
 		$io_method, "$io_method: io_method set correctly");
 
+	test_reset_stats($io_method, $node);
 	test_repeated_blocks($io_method, $node);
 
   SKIP:

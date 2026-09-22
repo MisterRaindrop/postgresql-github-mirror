@@ -64,6 +64,10 @@ CREATE FUNCTION read_stream_for_blocks(rel regclass, blocks int4[], OUT blockoff
 RETURNS SETOF record STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
 
+CREATE FUNCTION read_stream_reset_stats(rel regclass, blocks int4[])
+RETURNS pg_catalog.bool STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
 
 /*
  * Handle related functions
