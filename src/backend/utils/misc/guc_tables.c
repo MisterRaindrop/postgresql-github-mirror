@@ -31,6 +31,7 @@
 
 #include "access/commit_ts.h"
 #include "access/gin.h"
+#include "access/hash.h"
 #include "access/slru.h"
 #include "access/toast_compression.h"
 #include "access/twophase.h"
@@ -517,6 +518,13 @@ static const struct config_enum_entry data_checksums_options[] = {
 	{"off", PG_DATA_CHECKSUM_OFF, true},
 	{"inprogress-on", PG_DATA_CHECKSUM_INPROGRESS_ON, true},
 	{"inprogress-off", PG_DATA_CHECKSUM_INPROGRESS_OFF, true},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry hash_build_sort_mode_options[] = {
+	{"auto", HASH_BUILD_SORT_AUTO, false},
+	{"on", HASH_BUILD_SORT_ON, false},
+	{"off", HASH_BUILD_SORT_OFF, false},
 	{NULL, 0, false}
 };
 
