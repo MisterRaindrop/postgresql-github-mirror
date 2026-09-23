@@ -141,7 +141,7 @@ typedef struct xl_heap_truncate
 	Oid			dbId;
 	uint32		nrelids;
 	uint8		flags;
-	Oid			relids[FLEXIBLE_ARRAY_MEMBER];
+	pg_attribute_counted_by(nrelids) Oid			relids[FLEXIBLE_ARRAY_MEMBER];
 } xl_heap_truncate;
 
 #define SizeOfHeapTruncate	(offsetof(xl_heap_truncate, relids))
@@ -194,7 +194,7 @@ typedef struct xl_heap_multi_insert
 {
 	uint8		flags;
 	uint16		ntuples;
-	OffsetNumber offsets[FLEXIBLE_ARRAY_MEMBER];
+	pg_attribute_counted_by(ntuples) OffsetNumber offsets[FLEXIBLE_ARRAY_MEMBER];
 } xl_heap_multi_insert;
 
 #define SizeOfHeapMultiInsert	offsetof(xl_heap_multi_insert, offsets)
@@ -402,7 +402,7 @@ typedef struct xlhp_freeze_plan
 typedef struct xlhp_freeze_plans
 {
 	uint16		nplans;
-	xlhp_freeze_plan plans[FLEXIBLE_ARRAY_MEMBER];
+	pg_attribute_counted_by(nplans) xlhp_freeze_plan plans[FLEXIBLE_ARRAY_MEMBER];
 } xlhp_freeze_plans;
 
 /*
@@ -415,7 +415,7 @@ typedef struct xlhp_freeze_plans
 typedef struct xlhp_prune_items
 {
 	uint16		ntargets;
-	OffsetNumber data[FLEXIBLE_ARRAY_MEMBER];
+	pg_attribute_counted_by(ntargets) OffsetNumber data[FLEXIBLE_ARRAY_MEMBER];
 } xlhp_prune_items;
 
 
@@ -470,7 +470,7 @@ typedef struct xl_heap_inplace
 	Oid			tsId;			/* MyDatabaseTableSpace */
 	bool		relcacheInitFileInval;	/* invalidate relcache init files */
 	int			nmsgs;			/* number of shared inval msgs */
-	SharedInvalidationMessage msgs[FLEXIBLE_ARRAY_MEMBER];
+	pg_attribute_counted_by(nmsgs) SharedInvalidationMessage msgs[FLEXIBLE_ARRAY_MEMBER];
 } xl_heap_inplace;
 
 #define MinSizeOfHeapInplace	(offsetof(xl_heap_inplace, nmsgs) + sizeof(int))
