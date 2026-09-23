@@ -550,8 +550,9 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 		ereport(ERROR,
 				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 		/*- translator: first %s is name of a SQL command, eg. REPACK */
-				errmsg("cannot execute %s on a shared catalog",
-					   RepackCommandAsString(cmd)));
+				errmsg("cannot execute %s USING INDEX on a shared catalog",
+					   RepackCommandAsString(cmd)),
+				errdetail("Marking an index as clustered on a shared catalog would only take effect in the current database."));
 
 	/*
 	 * The CONCURRENTLY case should have been rejected earlier because it does
