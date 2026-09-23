@@ -220,7 +220,7 @@ typedef struct xl_xact_assignment
 {
 	TransactionId xtop;			/* assigned XID's top-level XID */
 	int			nsubxacts;		/* number of subtransaction XIDs */
-	TransactionId xsub[FLEXIBLE_ARRAY_MEMBER];	/* assigned subxids */
+	pg_attribute_counted_by(nsubxacts) TransactionId xsub[FLEXIBLE_ARRAY_MEMBER];	/* assigned subxids */
 } xl_xact_assignment;
 
 #define MinSizeOfXactAssignment offsetof(xl_xact_assignment, xsub)
@@ -262,14 +262,14 @@ typedef struct xl_xact_dbinfo
 typedef struct xl_xact_subxacts
 {
 	int			nsubxacts;		/* number of subtransaction XIDs */
-	TransactionId subxacts[FLEXIBLE_ARRAY_MEMBER];
+	pg_attribute_counted_by(nsubxacts) TransactionId subxacts[FLEXIBLE_ARRAY_MEMBER];
 } xl_xact_subxacts;
 #define MinSizeOfXactSubxacts offsetof(xl_xact_subxacts, subxacts)
 
 typedef struct xl_xact_relfilelocators
 {
 	int			nrels;			/* number of relations */
-	RelFileLocator xlocators[FLEXIBLE_ARRAY_MEMBER];
+	pg_attribute_counted_by(nrels) RelFileLocator xlocators[FLEXIBLE_ARRAY_MEMBER];
 } xl_xact_relfilelocators;
 #define MinSizeOfXactRelfileLocators offsetof(xl_xact_relfilelocators, xlocators)
 
@@ -296,14 +296,14 @@ typedef struct xl_xact_stats_item
 typedef struct xl_xact_stats_items
 {
 	int			nitems;
-	xl_xact_stats_item items[FLEXIBLE_ARRAY_MEMBER];
+	pg_attribute_counted_by(nitems) xl_xact_stats_item items[FLEXIBLE_ARRAY_MEMBER];
 } xl_xact_stats_items;
 #define MinSizeOfXactStatsItems offsetof(xl_xact_stats_items, items)
 
 typedef struct xl_xact_invals
 {
 	int			nmsgs;			/* number of shared inval msgs */
-	SharedInvalidationMessage msgs[FLEXIBLE_ARRAY_MEMBER];
+	pg_attribute_counted_by(nmsgs) SharedInvalidationMessage msgs[FLEXIBLE_ARRAY_MEMBER];
 } xl_xact_invals;
 #define MinSizeOfXactInvals offsetof(xl_xact_invals, msgs)
 
