@@ -55,6 +55,7 @@
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "parser/scansup.h"
+#include "storage/waiteventset.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
@@ -107,6 +108,10 @@ static PGresult *storeQueryResult(storeInfo *sinfo, PGconn *conn, const char *sq
 static void storeRow(storeInfo *sinfo, PGresult *res, bool first);
 static remoteConn *getConnectionByName(const char *name);
 static HTAB *createConnHash(void);
+static HTAB *createSocketHash(void);
+static void add_conn_to_event_set(PGconn *conn, const char *conname);
+static void remove_conn_from_event_set(PGconn *conn, const char *conname);
+static void rebuild_wait_event_set(void);
 static remoteConn *createNewConnection(const char *name);
 static void deleteConnection(const char *name);
 static char **get_pkey_attnames(Relation rel, int16 *indnkeyatts);
@@ -143,6 +148,8 @@ static bool dblink_connstr_has_required_scram_options(const char *connstr);
 /* Global */
 static remoteConn *pconn = NULL;
 static HTAB *remoteConnHash = NULL;
+static HTAB *socketHash = NULL;
+static WaitEventSet *set = NULL;
 
 /* custom wait event values, retrieved from shared memory */
 static uint32 dblink_we_connect = 0;
@@ -167,6 +174,12 @@ typedef struct remoteConnHashEnt
 	char		name[NAMEDATALEN];
 	remoteConn	rconn;
 } remoteConnHashEnt;
+
+typedef struct socketHashEnt
+{
+	int			socket;
+	char		name[NAMEDATALEN];
+}			socketHashEnt;
 
 /* initial number of connection hashes */
 #define NUMCONN 16
@@ -393,6 +406,8 @@ dblink_disconnect(PG_FUNCTION_ARGS)
 		deleteConnection(conname);
 	else
 		pconn->conn = NULL;
+
+	remove_conn_from_event_set(rconn->conn, conname);
 
 	PG_RETURN_TEXT_P(cstring_to_text("OK"));
 }
@@ -703,7 +718,96 @@ dblink_send_query(PG_FUNCTION_ARGS)
 	if (retval != 1)
 		elog(NOTICE, "could not send query: %s", pchomp(PQerrorMessage(conn)));
 
+	/* add socket to wait event set for epoll style processing */
+	add_conn_to_event_set(conn, text_to_cstring(PG_GETARG_TEXT_PP(0)));
+
 	PG_RETURN_INT32(retval);
+}
+
+PG_FUNCTION_INFO_V1(dblink_wait_for_query);
+Datum
+dblink_wait_for_query(PG_FUNCTION_ARGS)
+{
+	PGconn	   *conn;
+	uint32		wait_event_info = 0;
+	WaitEvent	event;
+	ArrayBuildState *astate = NULL;
+
+	int64		usecs;
+	TimestampTz endtime;
+
+	socketHashEnt *hentry;
+
+	float8		secs = PG_GETARG_FLOAT8(0);
+	bool  exit = PG_GETARG_BOOL(1);
+
+	if (isnan(secs) || secs <= 0.0)
+		PG_RETURN_NULL();
+
+	secs *= USECS_PER_SEC;		/* we assume overflow will produce +Inf */
+	secs = ceil(secs);			/* round up any fractional microsecond */
+	usecs = (int64) Min(secs, (float8) (PG_INT64_MAX / 2));
+
+	endtime = GetCurrentTimestamp() + usecs;
+
+	for (;;)
+	{
+		TimestampTz wait;
+		long		wait_ms;
+
+		if (set == NULL)
+			break;
+
+		CHECK_FOR_INTERRUPTS();
+
+		wait = endtime - GetCurrentTimestamp();
+		wait_ms = (long) ((wait + 999) / 1000);
+
+		if (wait_ms <= 0)
+			break;
+
+		wait_ms = wait_ms > 1000 ? 1000 : 0;
+
+		if (WaitEventSetWait(
+							 set,
+							 wait_ms,
+							 &event,
+							 1,
+							 wait_event_info) > 0)
+		{
+			hentry = (socketHashEnt *) hash_search(socketHash,
+												   &event.fd, HASH_FIND, NULL);
+
+			if (hentry == NULL)
+				/* shouldn't happen */
+				elog(ERROR, "Invalid socket");
+
+			if ((conn = getConnectionByName(hentry->name)->conn) == NULL)
+				/* shouldn't happen */
+				elog(ERROR, "Invalid connection");
+
+			PQconsumeInput(conn);
+
+			if (!PQisBusy(conn))
+			{
+				astate = accumArrayResult(astate,
+									  CStringGetTextDatum(hentry->name),
+									  false, TEXTOID, CurrentMemoryContext);
+
+				/* Stop tracking this conn in the WaitEventSet */
+				remove_conn_from_event_set(conn, hentry->name);
+
+				if (exit)
+					break;
+			}
+		}
+	}
+
+	if (astate)
+		PG_RETURN_DATUM(makeArrayResult(astate,
+										CurrentMemoryContext));
+	else
+		PG_RETURN_NULL();
 }
 
 PG_FUNCTION_INFO_V1(dblink_get_result);
@@ -711,6 +815,92 @@ Datum
 dblink_get_result(PG_FUNCTION_ARGS)
 {
 	return dblink_record_internal(fcinfo, true);
+}
+
+/* Build wait event set from hash table */
+static void
+rebuild_wait_event_set(void)
+{
+	WaitEventSet *new_set;
+	HASH_SEQ_STATUS status;
+	socketHashEnt *hentry;
+	int64		num_entries;
+
+	if ((num_entries = hash_get_num_entries(socketHash)) == 0)
+	{
+		FreeWaitEventSet(set);
+		set = NULL;
+		return;
+	}
+
+	new_set = CreateWaitEventSet(NULL, (int) num_entries);
+
+	hash_seq_init(&status, socketHash);
+	while ((hentry = (socketHashEnt *) hash_seq_search(&status)) != NULL)
+	{
+		/* add to wait event set */
+		(void) AddWaitEventToSet(new_set, WL_SOCKET_READABLE, hentry->socket, NULL, NULL);
+	}
+
+	if (set)
+	{
+		FreeWaitEventSet(set);
+	}
+
+	set = new_set;
+}
+
+static void
+add_conn_to_event_set(PGconn *conn, const char *conname)
+{
+	socketHashEnt *hentry;
+	int			key;
+	bool		found;
+
+	if (!socketHash)
+	{
+		socketHash = createSocketHash();
+	}
+
+	key = PQsocket(conn);
+	hentry = (socketHashEnt *) hash_search(socketHash, &key,
+										   HASH_ENTER, &found);
+
+	if (found)
+		ereport(ERROR,
+				(errcode(ERRCODE_DUPLICATE_OBJECT),
+				 errmsg("duplicate socket")));
+
+	/* Copy connection name into hash entry */
+	strlcpy(hentry->name, conname, NAMEDATALEN);
+
+	/* rebuild the WaitEventSet */
+	rebuild_wait_event_set();
+}
+
+/*
+ * Remove connection from WaitEventSet.  It's possible to attempt to remove a
+ * connection that has already been removed, if was cleaned up by
+ * dblink_wait_for_query() before dblink_get_result().
+ */
+static void
+remove_conn_from_event_set(PGconn *conn, const char *conname)
+{
+	int			key;
+	bool		found;
+
+	if (!socketHash)
+		return;
+
+	key = PQsocket(conn);
+	(void) hash_search(socketHash, &key,
+					   HASH_REMOVE, &found);
+
+	if (!found)
+		return;
+
+	/* rebuild the WaitEventSet */
+	rebuild_wait_event_set();
 }
 
 static Datum
@@ -802,6 +992,9 @@ dblink_record_internal(FunctionCallInfo fcinfo, bool is_async)
 			/* NULL means we're all done with the async results */
 			if (res)
 			{
+				/* Stop tracking this conn in the WaitEventSet */
+				remove_conn_from_event_set(conn, conname);
+
 				if (PQresultStatus(res) != PGRES_COMMAND_OK &&
 					PQresultStatus(res) != PGRES_TUPLES_OK)
 				{
@@ -2559,6 +2752,18 @@ createConnHash(void)
 
 	return hash_create("Remote Con hash", NUMCONN, &ctl,
 					   HASH_ELEM | HASH_STRINGS);
+}
+
+static HTAB *
+createSocketHash(void)
+{
+	HASHCTL		ctl;
+
+	ctl.keysize = sizeof(int);
+	ctl.entrysize = NAMEDATALEN;
+
+	return hash_create("Scoket hash", NUMCONN, &ctl,
+					   HASH_ELEM | HASH_BLOBS);
 }
 
 static remoteConn *
