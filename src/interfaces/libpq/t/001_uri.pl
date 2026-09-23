@@ -269,8 +269,8 @@ sub test_uri
 
 	my $cmd = [ 'libpq_uri_regress', $uri ];
 	$result{exit} = IPC::Run::run $cmd,
-	  '>' => \$result{stdout},
-	  '2>' => \$result{stderr};
+	  '>' => ipc_run_text_mode(), \$result{stdout},
+	  '2>' => ipc_run_text_mode(), \$result{stderr};
 
 	chomp($result{stdout});
 	chomp($result{stderr});

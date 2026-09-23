@@ -83,6 +83,7 @@ our @EXPORT = qw(
   scan_server_header
   system_or_bail
   system_log
+  ipc_run_text_mode
   run_log
   run_command
   pump_until
@@ -421,6 +422,21 @@ sub system_or_bail
 
 =pod
 
+=item ipc_run_text_mode()
+
+Return a filter suitable for C<IPC::Run> redirections that requests text mode.
+Use this for command output that TAP tests treat as text rather than relying
+on IPC::Run's platform-specific default.
+
+=cut
+
+sub ipc_run_text_mode
+{
+	return IPC::Run::binary(0);
+}
+
+=pod
+
 =item run_log(@cmd)
 
 Run the given command via C<IPC::Run::run()>, noting it in the log.
@@ -448,7 +464,9 @@ sub run_command
 {
 	my ($cmd) = @_;
 	my ($stdout, $stderr);
-	my $result = IPC::Run::run $cmd, '>' => \$stdout, '2>' => \$stderr;
+	my $result = IPC::Run::run $cmd,
+	  '>' => ipc_run_text_mode(), \$stdout,
+	  '2>' => ipc_run_text_mode(), \$stderr;
 	chomp($stdout);
 	chomp($stderr);
 	return ($stdout, $stderr);
@@ -1009,8 +1027,12 @@ sub command_ok
 	local $Test::Builder::Level = $Test::Builder::Level + 1;
 	my ($cmd, $test_name) = @_;
 	my ($stdout, $stderr);
+	my $stdin = '';
 	print("# Running: " . join(" ", @{$cmd}) . "\n");
-	my $result = IPC::Run::run $cmd, '>' => \$stdout, '2>' => \$stderr;
+	my $result = IPC::Run::run $cmd,
+	  '<' => \$stdin,
+	  '>' => ipc_run_text_mode(), \$stdout,
+	  '2>' => ipc_run_text_mode(), \$stderr;
 	ok($result, $test_name) or do
 	{
 		diag("---------- command failed ----------");
@@ -1033,7 +1055,9 @@ sub command_fails
 	my ($cmd, $test_name) = @_;
 	my ($stdout, $stderr);
 	print("# Running: " . join(" ", @{$cmd}) . "\n");
-	my $result = IPC::Run::run $cmd, '>' => \$stdout, '2>' => \$stderr;
+	my $result = IPC::Run::run $cmd,
+	  '>' => ipc_run_text_mode(), \$stdout,
+	  '2>' => ipc_run_text_mode(), \$stderr;
 	ok(!$result, $test_name) or do
 	{
 		diag("-- command succeeded unexpectedly --");
@@ -1084,8 +1108,8 @@ sub program_help_ok
 	my ($stdout, $stderr);
 	print("# Running: $cmd --help\n");
 	my $result = IPC::Run::run [ $cmd, '--help' ],
-	  '>' => \$stdout,
-	  '2>' => \$stderr;
+	  '>' => ipc_run_text_mode(), \$stdout,
+	  '2>' => ipc_run_text_mode(), \$stderr;
 	ok($result, "$cmd --help exit code 0");
 	isnt($stdout, '', "$cmd --help goes to stdout");
 	is($stderr, '', "$cmd --help nothing to stderr");
@@ -1116,8 +1140,8 @@ sub program_version_ok
 	my ($stdout, $stderr);
 	print("# Running: $cmd --version\n");
 	my $result = IPC::Run::run [ $cmd, '--version' ],
-	  '>' => \$stdout,
-	  '2>' => \$stderr;
+	  '>' => ipc_run_text_mode(), \$stdout,
+	  '2>' => ipc_run_text_mode(), \$stderr;
 	ok($result, "$cmd --version exit code 0");
 	isnt($stdout, '', "$cmd --version goes to stdout");
 	is($stderr, '', "$cmd --version nothing to stderr");
@@ -1140,8 +1164,8 @@ sub program_options_handling_ok
 	my ($stdout, $stderr);
 	print("# Running: $cmd --not-a-valid-option\n");
 	my $result = IPC::Run::run [ $cmd, '--not-a-valid-option' ],
-	  '>' => \$stdout,
-	  '2>' => \$stderr;
+	  '>' => ipc_run_text_mode(), \$stdout,
+	  '2>' => ipc_run_text_mode(), \$stderr;
 	ok(!$result, "$cmd with invalid option nonzero exit code");
 	isnt($stderr, '', "$cmd with invalid option prints error message");
 	return;
@@ -1162,7 +1186,9 @@ sub command_like
 	my ($cmd, $expected_stdout, $test_name) = @_;
 	my ($stdout, $stderr);
 	print("# Running: " . join(" ", @{$cmd}) . "\n");
-	my $result = IPC::Run::run $cmd, '>' => \$stdout, '2>' => \$stderr;
+	my $result = IPC::Run::run $cmd,
+	  '>' => ipc_run_text_mode(), \$stdout,
+	  '2>' => ipc_run_text_mode(), \$stderr;
 	ok($result, "$test_name: exit code 0");
 	is($stderr, '', "$test_name: no stderr");
 	like($stdout, $expected_stdout, "$test_name: matches");
@@ -1215,7 +1241,9 @@ sub command_fails_like
 	my ($cmd, $expected_stderr, $test_name) = @_;
 	my ($stdout, $stderr);
 	print("# Running: " . join(" ", @{$cmd}) . "\n");
-	my $result = IPC::Run::run $cmd, '>' => \$stdout, '2>' => \$stderr;
+	my $result = IPC::Run::run $cmd,
+	  '>' => ipc_run_text_mode(), \$stdout,
+	  '2>' => ipc_run_text_mode(), \$stderr;
 	ok(!$result, "$test_name: exit code not 0");
 	like($stderr, $expected_stderr, "$test_name: matches");
 	return;
@@ -1235,8 +1263,12 @@ sub command_ok_or_fails_like
 	local $Test::Builder::Level = $Test::Builder::Level + 1;
 	my ($cmd, $expected_stdout, $expected_stderr, $test_name) = @_;
 	my ($stdout, $stderr);
+	my $stdin = '';
 	print("# Running: " . join(" ", @{$cmd}) . "\n");
-	my $result = IPC::Run::run $cmd, '>' => \$stdout, '2>' => \$stderr;
+	my $result = IPC::Run::run $cmd,
+	  '<' => \$stdin,
+	  '>' => ipc_run_text_mode(), \$stdout,
+	  '2>' => ipc_run_text_mode(), \$stderr;
 	if (!$result)
 	{
 		like($stdout, $expected_stdout, "$test_name: stdout matches");
@@ -1277,7 +1309,10 @@ sub command_checks_all
 	# run command
 	my ($stdout, $stderr);
 	print("# Running: " . join(" ", @{$cmd}) . "\n");
-	IPC::Run::run($cmd, '>' => \$stdout, '2>' => \$stderr);
+	IPC::Run::run(
+		$cmd,
+		'>' => ipc_run_text_mode(), \$stdout,
+		'2>' => ipc_run_text_mode(), \$stderr);
 
 	# See http://perldoc.perl.org/perlvar.html#%24CHILD_ERROR
 	my $ret = $?;
