@@ -831,11 +831,24 @@ ReplicationSlotRelease(void)
 		MyReplicationSlot = NULL;
 	}
 
-	/* might not have been set when we've been a plain slot */
-	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-	MyProc->statusFlags &= ~PROC_IN_LOGICAL_DECODING;
-	ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
-	LWLockRelease(ProcArrayLock);
+	/*
+	 * This function is also reached from an auxiliary process:
+	 * InvalidatePossiblyObsoleteSlot() acquires the doomed slot on behalf of
+	 * the checkpointer, or of the startup process during a restartpoint, and
+	 * releases it here.  An auxiliary process is never entered into the proc
+	 * array, so its pgxactoff is still the zero it was initialized to, and
+	 * the store below would land on the ProcGlobal->statusFlags[] array entry
+	 * of whichever backend owns offset 0.
+	 */
+	if (MyProc->statusFlags & PROC_IN_LOGICAL_DECODING)
+	{
+		Assert(!AmAuxiliaryProcess());
+
+		LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+		MyProc->statusFlags &= ~PROC_IN_LOGICAL_DECODING;
+		ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
+		LWLockRelease(ProcArrayLock);
+	}
 
 	if (am_walsender)
 	{

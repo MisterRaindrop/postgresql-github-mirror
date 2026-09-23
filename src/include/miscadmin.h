@@ -410,6 +410,9 @@ extern PGDLLIMPORT BackendType MyBackendType;
 	(AmAutoVacuumLauncherProcess() || \
 	 AmLogicalSlotSyncWorkerProcess())
 
+#define AmAuxiliaryProcess() \
+	(MyBackendType >= B_ARCHIVER && MyBackendType <= B_WAL_WRITER)
+
 /*
  * Backend types that are spawned by the postmaster to serve a client or
  * replication connection. These backend types have in common that they are
