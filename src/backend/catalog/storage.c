@@ -20,6 +20,8 @@
 #include "postgres.h"
 
 #include "access/visibilitymap.h"
+#include "access/transam.h"
+#include "access/twophase.h"
 #include "access/xact.h"
 #include "access/xlog.h"
 #include "access/xloginsert.h"
@@ -28,9 +30,12 @@
 #include "catalog/storage_xlog.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "port/pg_crc32c.h"
 #include "storage/bulk_write.h"
+#include "storage/fd.h"
 #include "storage/freespace.h"
 #include "storage/proc.h"
+#include "storage/procarray.h"
 #include "storage/smgr.h"
 #include "utils/hsearch.h"
 #include "utils/memutils.h"
@@ -38,6 +43,387 @@
 
 /* GUC variables */
 int			wal_skip_threshold = 2048;	/* in kilobytes */
+
+#define RELATION_CREATE_MANIFEST_DIR "pg_relcreate"
+#define RELATION_CREATE_MANIFEST_MAGIC 0x52434D46
+#define RELATION_CREATE_MANIFEST_VERSION 1
+
+typedef enum RelationCreateManifestOperation
+{
+	RELATION_CREATE_MANIFEST_CREATE = 1,
+	RELATION_CREATE_MANIFEST_PRESERVE,
+	RELATION_CREATE_MANIFEST_COMPLETE
+} RelationCreateManifestOperation;
+
+typedef struct RelationCreateManifestRecord
+{
+	uint32		magic;
+	uint32		version;
+	uint32		operation;
+	TransactionId xid;
+	RelFileLocator rlocator;
+	pg_crc32c	crc;
+} RelationCreateManifestRecord;
+
+static void
+relation_create_manifest_path(char *path, Size size, TransactionId xid)
+{
+	snprintf(path, size, RELATION_CREATE_MANIFEST_DIR "/%u", xid);
+}
+
+static bool
+append_relation_create_manifest(TransactionId xid,
+								const RelFileLocator *rlocator,
+								RelationCreateManifestOperation operation,
+								bool create_if_missing, int elevel)
+{
+	RelationCreateManifestRecord record = {0};
+	RelationCreateManifestRecord existing;
+	char		path[MAXPGPATH];
+	int			fd;
+	int			save_errno;
+	off_t		file_size;
+	off_t		offset;
+	bool		created = false;
+
+	relation_create_manifest_path(path, sizeof(path), xid);
+	record.magic = RELATION_CREATE_MANIFEST_MAGIC;
+	record.version = RELATION_CREATE_MANIFEST_VERSION;
+	record.operation = operation;
+	record.xid = xid;
+	if (rlocator != NULL)
+		record.rlocator = *rlocator;
+	INIT_CRC32C(record.crc);
+	COMP_CRC32C(record.crc, &record,
+				offsetof(RelationCreateManifestRecord, crc));
+	FIN_CRC32C(record.crc);
+
+	if (create_if_missing)
+	{
+		fd = OpenTransientFile(path, O_RDWR | O_CREAT | O_EXCL | PG_BINARY);
+		if (fd >= 0)
+			created = true;
+		else if (errno == EEXIST)
+			fd = OpenTransientFile(path, O_RDWR | PG_BINARY);
+	}
+	else
+		fd = OpenTransientFile(path, O_RDWR | PG_BINARY);
+	if (fd < 0)
+	{
+		if (!create_if_missing && errno == ENOENT)
+			return false;
+		ereport(elevel,
+				(errcode_for_file_access(),
+				 errmsg("could not open relation creation manifest \"%s\": %m",
+						path)));
+	}
+
+	file_size = lseek(fd, 0, SEEK_END);
+	if (file_size < 0)
+	{
+		save_errno = errno;
+		CloseTransientFile(fd);
+		errno = save_errno;
+		ereport(elevel,
+				(errcode_for_file_access(),
+				 errmsg("could not seek relation creation manifest \"%s\": %m",
+						path)));
+	}
+	offset = file_size - file_size % sizeof(existing);
+
+	if (offset > 0)
+	{
+		pg_crc32c	crc;
+		ssize_t		nread;
+
+		nread = pg_pread(fd, &existing, sizeof(existing),
+						 (pgoff_t) (offset - sizeof(existing)));
+		if (nread != sizeof(existing))
+		{
+			save_errno = nread < 0 ? errno : EIO;
+			CloseTransientFile(fd);
+			errno = save_errno;
+			ereport(elevel,
+					(errcode_for_file_access(),
+					 errmsg("could not read relation creation manifest \"%s\": %m",
+							path)));
+		}
+		INIT_CRC32C(crc);
+		COMP_CRC32C(crc, &existing,
+					offsetof(RelationCreateManifestRecord, crc));
+		FIN_CRC32C(crc);
+		if (existing.magic != RELATION_CREATE_MANIFEST_MAGIC ||
+			existing.version != RELATION_CREATE_MANIFEST_VERSION ||
+			!TransactionIdEquals(existing.xid, xid) ||
+			(existing.operation != RELATION_CREATE_MANIFEST_CREATE &&
+			 existing.operation != RELATION_CREATE_MANIFEST_PRESERVE &&
+			 existing.operation != RELATION_CREATE_MANIFEST_COMPLETE) ||
+			!EQ_CRC32C(crc, existing.crc))
+		{
+			CloseTransientFile(fd);
+			ereport(elevel,
+					(errcode_for_file_access(),
+					 errmsg("invalid relation creation manifest \"%s\"", path)));
+		}
+		if (file_size == offset && existing.operation == operation &&
+			RelFileLocatorEquals(existing.rlocator, record.rlocator))
+		{
+			CloseTransientFile(fd);
+			return true;
+		}
+	}
+
+	if (ftruncate(fd, offset) != 0 || lseek(fd, offset, SEEK_SET) < 0 ||
+		write(fd, &record, sizeof(record)) != sizeof(record) ||
+		pg_fsync(fd) != 0)
+	{
+		save_errno = errno;
+		CloseTransientFile(fd);
+		errno = save_errno;
+		ereport(elevel,
+				(errcode_for_file_access(),
+				 errmsg("could not write relation creation manifest \"%s\": %m",
+						path)));
+	}
+
+	if (CloseTransientFile(fd) != 0)
+		ereport(elevel,
+				(errcode_for_file_access(),
+				 errmsg("could not close relation creation manifest \"%s\": %m",
+						path)));
+
+	if (created)
+		fsync_fname(RELATION_CREATE_MANIFEST_DIR, true);
+
+	return true;
+}
+
+void
+RelationCreateManifestCleanup(TransactionId xid)
+{
+	char		path[MAXPGPATH];
+
+	/*
+	 * Make a failed or non-durable unlink harmless.  This is done only after
+	 * transaction-end storage cleanup, so a durable COMPLETE record proves
+	 * that this manifest must never drive recovery-time relation removal.
+	 */
+	if (!append_relation_create_manifest(xid, NULL,
+									 RELATION_CREATE_MANIFEST_COMPLETE,
+									 false, PANIC))
+		return;
+
+	relation_create_manifest_path(path, sizeof(path), xid);
+	if (unlink(path) == 0)
+		fsync_fname(RELATION_CREATE_MANIFEST_DIR, true);
+	else if (errno != ENOENT)
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("could not remove relation creation manifest \"%s\": %m",
+						path)));
+}
+
+void
+RelationCreateManifestCleanupTree(TransactionId xid, int nsubxacts,
+								  TransactionId *subxacts)
+{
+	RelationCreateManifestCleanup(xid);
+	for (int i = 0; i < nsubxacts; i++)
+		RelationCreateManifestCleanup(subxacts[i]);
+}
+
+static void
+relation_create_manifest_reconcile(bool end_of_recovery)
+{
+	DIR		   *dir;
+	struct dirent *de;
+
+	dir = AllocateDir(RELATION_CREATE_MANIFEST_DIR);
+	if (dir == NULL)
+		ereport(FATAL,
+				(errcode_for_file_access(),
+				 errmsg("could not open relation creation manifest directory \"%s\": %m",
+						RELATION_CREATE_MANIFEST_DIR)));
+
+	while ((de = ReadDir(dir, RELATION_CREATE_MANIFEST_DIR)) != NULL)
+	{
+		RelationCreateManifestRecord *records = NULL;
+		RelationCreateManifestRecord record;
+		char		path[MAXPGPATH];
+		char	   *endptr;
+		unsigned long parsed_xid;
+		TransactionId xid;
+		int			fd;
+		int			nrecords = 0;
+		int			maxrecords = 0;
+		ssize_t		nread;
+		bool		complete = false;
+
+		if (de->d_name[0] == '.')
+			continue;
+
+		errno = 0;
+		parsed_xid = strtoul(de->d_name, &endptr, 10);
+		if (errno != 0 || *endptr != '\0' || parsed_xid > PG_UINT32_MAX ||
+			!TransactionIdIsValid((TransactionId) parsed_xid))
+			ereport(FATAL,
+					(errcode_for_file_access(),
+					 errmsg("invalid relation creation manifest name \"%s\"",
+							de->d_name)));
+		xid = (TransactionId) parsed_xid;
+		snprintf(path, sizeof(path), RELATION_CREATE_MANIFEST_DIR "/%s",
+				 de->d_name);
+		fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
+		if (fd < 0)
+		{
+			if (errno == ENOENT)
+				continue;
+			ereport(FATAL,
+					(errcode_for_file_access(),
+					 errmsg("could not open relation creation manifest \"%s\": %m",
+							path)));
+		}
+
+		while ((nread = read(fd, &record, sizeof(record))) == sizeof(record))
+		{
+			pg_crc32c	crc;
+
+			INIT_CRC32C(crc);
+			COMP_CRC32C(crc, &record,
+						offsetof(RelationCreateManifestRecord, crc));
+			FIN_CRC32C(crc);
+			if (record.magic != RELATION_CREATE_MANIFEST_MAGIC ||
+				record.version != RELATION_CREATE_MANIFEST_VERSION ||
+				!TransactionIdEquals(record.xid, xid) ||
+				(record.operation != RELATION_CREATE_MANIFEST_CREATE &&
+				 record.operation != RELATION_CREATE_MANIFEST_PRESERVE &&
+				 record.operation != RELATION_CREATE_MANIFEST_COMPLETE) ||
+				!EQ_CRC32C(crc, record.crc))
+			{
+				CloseTransientFile(fd);
+				ereport(FATAL,
+						(errcode_for_file_access(),
+						 errmsg("invalid relation creation manifest \"%s\"", path)));
+			}
+			if (complete)
+			{
+				CloseTransientFile(fd);
+				ereport(FATAL,
+						(errcode_for_file_access(),
+						 errmsg("invalid relation creation manifest \"%s\"", path)));
+			}
+			complete = record.operation == RELATION_CREATE_MANIFEST_COMPLETE;
+			if (nrecords == maxrecords)
+			{
+				if (maxrecords == 0)
+				{
+					maxrecords = 8;
+					records = palloc_array(RelationCreateManifestRecord,
+										 maxrecords);
+				}
+				else
+				{
+					maxrecords *= 2;
+					records = repalloc_array(records,
+										  RelationCreateManifestRecord,
+										  maxrecords);
+				}
+			}
+			records[nrecords++] = record;
+		}
+		if (nread != 0)
+		{
+			int			save_errno = nread < 0 ? errno : EIO;
+
+			CloseTransientFile(fd);
+			errno = save_errno;
+			ereport(FATAL,
+					(errcode_for_file_access(),
+					 errmsg("could not read relation creation manifest \"%s\": %m",
+							path)));
+		}
+		if (CloseTransientFile(fd) != 0)
+			ereport(FATAL,
+					(errcode_for_file_access(),
+					 errmsg("could not close relation creation manifest \"%s\": %m",
+							path)));
+
+		if (complete)
+		{
+			RelationCreateManifestCleanup(xid);
+			pfree(records);
+			continue;
+		}
+
+		if (!end_of_recovery && TransactionIdIsInProgress(xid))
+		{
+			pfree(records);
+			continue;
+		}
+		if (TwoPhaseTransactionIdIsPrepared(xid))
+		{
+			pfree(records);
+			continue;
+		}
+		if (TransactionIdDidCommit(xid))
+		{
+			RelationCreateManifestCleanup(xid);
+			pfree(records);
+			continue;
+		}
+		if (!end_of_recovery)
+		{
+			/*
+			 * Normal abort processing owns storage cleanup while backends are
+			 * running.  Racing it here could unlink a newly reused relfilenumber.
+			 */
+			pfree(records);
+			continue;
+		}
+
+		for (int i = 0; i < nrecords; i++)
+		{
+			bool		preserved = false;
+
+			if (records[i].operation != RELATION_CREATE_MANIFEST_CREATE)
+				continue;
+			for (int j = i + 1; j < nrecords; j++)
+			{
+				if (records[j].operation == RELATION_CREATE_MANIFEST_PRESERVE &&
+					RelFileLocatorEquals(records[j].rlocator,
+									 records[i].rlocator))
+				{
+					preserved = true;
+					break;
+				}
+			}
+			if (!preserved)
+			{
+				SMgrRelation srel = smgropen(records[i].rlocator,
+										  INVALID_PROC_NUMBER);
+
+				smgrdounlinkall(&srel, 1, true);
+				smgrclose(srel);
+			}
+		}
+		RelationCreateManifestCleanup(xid);
+		pfree(records);
+	}
+
+	FreeDir(dir);
+}
+
+void
+RelationCreateManifestCleanupAtCheckpoint(void)
+{
+	relation_create_manifest_reconcile(false);
+}
+
+void
+RelationCreateManifestCleanupAtEndOfRecovery(void)
+{
+	relation_create_manifest_reconcile(true);
+}
 
 /*
  * We keep a list of all relations (represented as RelFileLocator values)
@@ -63,6 +449,7 @@ typedef struct PendingRelDelete
 {
 	RelFileLocator rlocator;	/* relation that may need to be deleted */
 	ProcNumber	procNumber;		/* INVALID_PROC_NUMBER if not a temp rel */
+	TransactionId createXid;	/* XID owning the creation manifest */
 	bool		atCommit;		/* T=delete at commit; F=delete at abort */
 	int			nestLevel;		/* xact nesting level of request */
 	struct PendingRelDelete *next;	/* linked-list link */
@@ -124,6 +511,7 @@ RelationCreateStorage(RelFileLocator rlocator, char relpersistence,
 {
 	SMgrRelation srel;
 	ProcNumber	procNumber;
+	TransactionId createXid = InvalidTransactionId;
 	bool		needs_wal;
 
 	Assert(!IsInParallelMode());	/* couldn't update pendingSyncHash */
@@ -148,6 +536,17 @@ RelationCreateStorage(RelFileLocator rlocator, char relpersistence,
 	}
 
 	srel = smgropen(rlocator, procNumber);
+
+	if (needs_wal && register_delete)
+	{
+		createXid = log_smgrprecreate(&srel->smgr_rlocator.locator);
+		append_relation_create_manifest(createXid, &rlocator,
+									RELATION_CREATE_MANIFEST_CREATE,
+									true, ERROR);
+		MyXactFlags |= XACT_FLAGS_HAS_RELATION_CREATE;
+		ForceSyncCommit();
+	}
+
 	smgrcreate(srel, MAIN_FORKNUM, false);
 
 	if (needs_wal)
@@ -165,6 +564,7 @@ RelationCreateStorage(RelFileLocator rlocator, char relpersistence,
 			MemoryContextAlloc(TopMemoryContext, sizeof(PendingRelDelete));
 		pending->rlocator = rlocator;
 		pending->procNumber = procNumber;
+		pending->createXid = createXid;
 		pending->atCommit = false;	/* delete if abort */
 		pending->nestLevel = GetCurrentTransactionNestLevel();
 		pending->next = pendingDeletes;
@@ -186,7 +586,7 @@ RelationCreateStorage(RelFileLocator rlocator, char relpersistence,
 void
 log_smgrcreate(const RelFileLocator *rlocator, ForkNumber forkNum)
 {
-	xl_smgr_create xlrec;
+	xl_smgr_create xlrec = {0};
 
 	/*
 	 * Make an XLOG entry reporting the file creation.
@@ -197,6 +597,40 @@ log_smgrcreate(const RelFileLocator *rlocator, ForkNumber forkNum)
 	XLogBeginInsert();
 	XLogRegisterData(&xlrec, sizeof(xlrec));
 	XLogInsert(RM_SMGR_ID, XLOG_SMGR_CREATE | XLR_SPECIAL_REL_UPDATE);
+}
+
+/*
+ * Log the intent to create a relation before its durable marker is written.
+ */
+TransactionId
+log_smgrprecreate(const RelFileLocator *rlocator)
+{
+	xl_smgr_precreate xlrec;
+	TransactionId xid = GetCurrentTransactionId();
+
+	xlrec.rlocator = *rlocator;
+
+	XLogBeginInsert();
+	XLogRegisterData(&xlrec, sizeof(xlrec));
+	XLogInsert(RM_SMGR_ID, XLOG_SMGR_PRECREATE | XLR_SPECIAL_REL_UPDATE);
+
+	return xid;
+}
+
+/*
+ * Log that a relation is no longer to be removed if its creator aborts.
+ */
+void
+log_smgrpreserve(const RelFileLocator *rlocator, TransactionId xid)
+{
+	xl_smgr_preserve xlrec;
+
+	xlrec.rlocator = *rlocator;
+	xlrec.xid = xid;
+
+	XLogBeginInsert();
+	XLogRegisterData(&xlrec, sizeof(xlrec));
+	XLogInsert(RM_SMGR_ID, XLOG_SMGR_PRESERVE | XLR_SPECIAL_REL_UPDATE);
 }
 
 /*
@@ -213,6 +647,7 @@ RelationDropStorage(Relation rel)
 		MemoryContextAlloc(TopMemoryContext, sizeof(PendingRelDelete));
 	pending->rlocator = rel->rd_locator;
 	pending->procNumber = rel->rd_backend;
+	pending->createXid = InvalidTransactionId;
 	pending->atCommit = true;	/* delete if commit */
 	pending->nestLevel = GetCurrentTransactionNestLevel();
 	pending->next = pendingDeletes;
@@ -262,6 +697,15 @@ RelationPreserveStorage(RelFileLocator rlocator, bool atCommit)
 		if (RelFileLocatorEquals(rlocator, pending->rlocator)
 			&& pending->atCommit == atCommit)
 		{
+			if (!atCommit && TransactionIdIsValid(pending->createXid))
+			{
+				log_smgrpreserve(&pending->rlocator, pending->createXid);
+				append_relation_create_manifest(pending->createXid,
+										&pending->rlocator,
+										RELATION_CREATE_MANIFEST_PRESERVE,
+										true, ERROR);
+			}
+
 			/* unlink and delete list entry */
 			if (prev)
 				prev->next = next;
@@ -679,6 +1123,9 @@ smgrDoPendingDeletes(bool isCommit)
 	int			nrels = 0,
 				maxrels = 0;
 	SMgrRelation *srels = NULL;
+	int			ncreateXids = 0,
+				maxcreateXids = 0;
+	TransactionId *createXids = NULL;
 
 	prev = NULL;
 	for (pending = pendingDeletes; pending != NULL; pending = next)
@@ -716,7 +1163,38 @@ smgrDoPendingDeletes(bool isCommit)
 				}
 
 				srels[nrels++] = srel;
+
+				if (!isCommit && TransactionIdIsValid(pending->createXid))
+				{
+					int			i;
+
+					for (i = 0; i < ncreateXids; i++)
+						if (TransactionIdEquals(createXids[i],
+												pending->createXid))
+							break;
+
+					if (i == ncreateXids)
+					{
+						if (maxcreateXids == 0)
+						{
+							maxcreateXids = 8;
+							createXids = palloc_array(TransactionId,
+														 maxcreateXids);
+						}
+						else if (maxcreateXids <= ncreateXids)
+						{
+							maxcreateXids *= 2;
+							createXids = repalloc_array(createXids,
+														TransactionId,
+														maxcreateXids);
+						}
+
+						createXids[ncreateXids++] = pending->createXid;
+					}
+				}
 			}
+			else if (isCommit && TransactionIdIsValid(pending->createXid))
+				RelationCreateManifestCleanup(pending->createXid);
 			/* must explicitly free the list entry */
 			pfree(pending);
 			/* prev does not change */
@@ -732,6 +1210,11 @@ smgrDoPendingDeletes(bool isCommit)
 
 		pfree(srels);
 	}
+
+	for (int i = 0; i < ncreateXids; i++)
+		RelationCreateManifestCleanup(createXids[i]);
+	if (createXids != NULL)
+		pfree(createXids);
 }
 
 /*
@@ -986,7 +1469,26 @@ smgr_redo(XLogReaderState *record)
 	/* Backup blocks are not used in smgr records */
 	Assert(!XLogRecHasAnyBlockRefs(record));
 
-	if (info == XLOG_SMGR_CREATE)
+	if (info == XLOG_SMGR_PRECREATE)
+	{
+		xl_smgr_precreate *xlrec = (xl_smgr_precreate *) XLogRecGetData(record);
+		TransactionId xid = XLogRecGetXid(record);
+
+		if (!TransactionIdIsValid(xid))
+			elog(PANIC, "relation pre-create WAL record has no transaction ID");
+		append_relation_create_manifest(xid, &xlrec->rlocator,
+									RELATION_CREATE_MANIFEST_CREATE,
+									true, PANIC);
+	}
+	else if (info == XLOG_SMGR_PRESERVE)
+	{
+		xl_smgr_preserve *xlrec = (xl_smgr_preserve *) XLogRecGetData(record);
+
+		append_relation_create_manifest(xlrec->xid, &xlrec->rlocator,
+									RELATION_CREATE_MANIFEST_PRESERVE,
+									true, PANIC);
+	}
+	else if (info == XLOG_SMGR_CREATE)
 	{
 		xl_smgr_create *xlrec = (xl_smgr_create *) XLogRecGetData(record);
 		SMgrRelation reln;
