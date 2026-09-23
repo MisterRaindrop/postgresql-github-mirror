@@ -931,6 +931,14 @@ create_edata_for_relation(LogicalRepRelMapEntry *rel)
 
 	estate->es_output_cid = GetCurrentCommandId(true);
 
+	/*
+	 * Executor routines read the relation through es_snapshot.  Give them the
+	 * snapshot begin_replication_step() pushed for this change; the estate is
+	 * gone again before that snapshot is popped, so there is no need to
+	 * register it.
+	 */
+	estate->es_snapshot = GetActiveSnapshot();
+
 	/* Prepare to catch AFTER triggers. */
 	AfterTriggerBeginQuery();
 
