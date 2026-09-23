@@ -1518,11 +1518,32 @@ DROP TABLE testpub_tbl4;
 CREATE PUBLICATION testpub_fortbl FOR TABLE testpub_view;
 ERROR:  cannot add relation "testpub_view" to publication
 DETAIL:  This operation is not supported for views.
+-- fail - view in the EXCEPT clause
+CREATE PUBLICATION testpub_exceptview FOR ALL TABLES EXCEPT (TABLE testpub_view);
+ERROR:  cannot specify relation "public.testpub_view" in the publication EXCEPT clause
+DETAIL:  This operation is not supported for views.
+-- fail - system table in the EXCEPT clause
+CREATE PUBLICATION testpub_exceptsystbl FOR ALL TABLES EXCEPT (TABLE pg_class);
+ERROR:  cannot specify relation "pg_catalog.pg_class" in the publication EXCEPT clause
+DETAIL:  This operation is not supported for system tables.
 CREATE TEMPORARY TABLE testpub_temptbl(a int);
 -- fail - temporary table
 CREATE PUBLICATION testpub_fortemptbl FOR TABLE testpub_temptbl;
 ERROR:  cannot add relation "testpub_temptbl" to publication
 DETAIL:  This operation is not supported for temporary tables.
+-- fail - temporary table in the EXCEPT clause.  The temporary schema number
+-- depends on the backend, so the message is printed with it redacted.
+DO $$
+DECLARE
+    detail text;
+BEGIN
+    CREATE PUBLICATION testpub_excepttemptbl FOR ALL TABLES EXCEPT (TABLE testpub_temptbl);
+EXCEPTION WHEN invalid_parameter_value THEN
+    GET STACKED DIAGNOSTICS detail = PG_EXCEPTION_DETAIL;
+    RAISE NOTICE '% (%)',
+        regexp_replace(SQLERRM, 'pg_temp_[0-9]+', 'pg_temp_REDACTED'), detail;
+END $$;
+NOTICE:  cannot specify relation "pg_temp_REDACTED.testpub_temptbl" in the publication EXCEPT clause (This operation is not supported for temporary tables.)
 DROP TABLE testpub_temptbl;
 CREATE UNLOGGED TABLE testpub_unloggedtbl(a int);
 -- fail - unlogged table

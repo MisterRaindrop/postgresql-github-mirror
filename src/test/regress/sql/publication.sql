@@ -955,9 +955,27 @@ DROP TABLE testpub_tbl4;
 -- fail - view
 CREATE PUBLICATION testpub_fortbl FOR TABLE testpub_view;
 
+-- fail - view in the EXCEPT clause
+CREATE PUBLICATION testpub_exceptview FOR ALL TABLES EXCEPT (TABLE testpub_view);
+
+-- fail - system table in the EXCEPT clause
+CREATE PUBLICATION testpub_exceptsystbl FOR ALL TABLES EXCEPT (TABLE pg_class);
+
 CREATE TEMPORARY TABLE testpub_temptbl(a int);
 -- fail - temporary table
 CREATE PUBLICATION testpub_fortemptbl FOR TABLE testpub_temptbl;
+-- fail - temporary table in the EXCEPT clause.  The temporary schema number
+-- depends on the backend, so the message is printed with it redacted.
+DO $$
+DECLARE
+    detail text;
+BEGIN
+    CREATE PUBLICATION testpub_excepttemptbl FOR ALL TABLES EXCEPT (TABLE testpub_temptbl);
+EXCEPTION WHEN invalid_parameter_value THEN
+    GET STACKED DIAGNOSTICS detail = PG_EXCEPTION_DETAIL;
+    RAISE NOTICE '% (%)',
+        regexp_replace(SQLERRM, 'pg_temp_[0-9]+', 'pg_temp_REDACTED'), detail;
+END $$;
 DROP TABLE testpub_temptbl;
 
 CREATE UNLOGGED TABLE testpub_unloggedtbl(a int);
