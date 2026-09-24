@@ -31,6 +31,23 @@ find the file src/tools/pgindent/exclude_file_patterns. The --excludes option
 can be used more than once to specify multiple files containing exclusion
 patterns.
 
+Whole directories can be skipped with the --exclude-dir option, which is
+useful for build directories containing generated .c and .h files, for
+example:
+
+	pgindent . --exclude-dir=build --exclude-dir=build2
+
+Relative directory names are interpreted relative to the directory pgindent
+is invoked in. This option can also be used more than once.
+
+Build directories that pgindent comes across while scanning a
+directory are recognized and skipped automatically, so they usually
+don't need to be listed with --exclude-dir.  This works for Meson
+build directories and for Autoconf build directories created outside
+the source tree.  A build directory named directly on the command line
+is still processed, on the assumption that this was asked for on
+purpose.
+
 There are also two non-destructive modes of pgindent. If given the --diff
 option pgindent will show the changes it would make, but doesn't actually make
 them. If given instead the --check option, pgindent will exit with a status of

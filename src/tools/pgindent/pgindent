@@ -43,7 +43,8 @@ my $indent_opts =
 
 my $devnull = File::Spec->devnull;
 
-my ($typedefs_file, $typedef_str, @excludes, $indent, $diff,
+my ($typedefs_file, $typedef_str, @excludes,
+	@exclude_dirs, $indent, $diff,
 	$check, $help, @commits,);
 
 $help = 0;
@@ -54,6 +55,7 @@ my %options = (
 	"typedefs=s" => \$typedefs_file,
 	"list-of-typedefs=s" => \$typedef_str,
 	"excludes=s" => \@excludes,
+	"exclude-dir=s" => \@exclude_dirs,
 	"indent=s" => \$indent,
 	"diff" => \$diff,
 	"check" => \$check,);
@@ -63,6 +65,12 @@ usage() if $help;
 
 usage("Cannot use --commit with command line file list")
   if (@commits && @ARGV);
+
+# --exclude-dir arguments are relative to the directory pgindent was
+# invoked in, so resolve them to absolute paths now, before we
+# possibly chdir() elsewhere.  abs_path returns undef for a directory
+# that doesn't exist, so drop those.
+@exclude_dirs = grep { defined } map { abs_path($_) } @exclude_dirs;
 
 # command line option wins, then environment, then locations based on current
 # dir, then default location
@@ -209,6 +217,46 @@ sub process_exclude
 	return;
 }
 
+# Is the given file or directory inside one of the --exclude-dir
+# directories?  The argument is interpreted relative to the current
+# directory.
+sub in_excluded_dir
+{
+	my $path = shift;
+
+	return 0 unless @exclude_dirs;
+
+	# abs_path() returns undef if a directory along the path is
+	# missing, which can happen for a file named by --commit that has
+	# since been removed.  Fall back to a purely textual absolute
+	# path, so that such a file is still recognized as excluded rather
+	# than warned about later.
+	my $abs = abs_path($path);
+	$abs = File::Spec->canonpath(File::Spec->rel2abs($path))
+	  unless defined $abs;
+
+	foreach my $dir (@exclude_dirs)
+	{
+		return 1 if $abs eq $dir || index($abs, "$dir/") == 0;
+	}
+
+	return 0;
+}
+
+# Does the given directory look like the top of a build tree?
+sub is_build_dir
+{
+	my $dir = shift;
+
+	# This is how Meson itself identifiers a build tree.
+	return 1 if -f "$dir/meson-private/coredata.dat";
+
+	# Autoconf VPATH build directory
+	return 1 if -f "$dir/config.status" && !-f "$dir/configure.ac";
+
+	return 0;
+}
+
 sub read_source
 {
 	my $source_filename = shift;
@@ -353,11 +401,14 @@ sub run_indent
 	$bak_to_cleanup = "$filename.BAK";
 
 	$$error_message = `$cmd $filename 2>&1`;
+	my $rc = $?;
 
-	return "" if ($? || length($$error_message) > 0);
-
+	# pg_bsd_indent leaves its .BAK file behind whether or not it succeeded,
+	# so get rid of it before looking at the result.
 	unlink $bak_to_cleanup;
 	$bak_to_cleanup = undef;
+
+	return "" if ($rc || length($$error_message) > 0);
 
 	open(my $src_out, '<', $filename) || die $!;
 	local ($/) = undef;
@@ -395,10 +446,12 @@ Options:
 	--typedefs=FILE         file containing a list of typedefs
 	--list-of-typedefs=STR  string containing typedefs, space separated
 	--excludes=PATH         file containing list of filename patterns to ignore
+	--exclude-dir=DIR       skip all files below the directory DIR
 	--indent=PATH           path to pg_bsd_indent program
 	--diff                  show the changes that would be made
 	--check                 exit with status 2 if any changes would be made
-The --excludes and --commit options can be given more than once.
+The --excludes, --exclude-dir, and --commit options can be given more
+than once.
 EOF
 	if ($help)
 	{
@@ -420,8 +473,22 @@ check_indent();
 
 my $wanted = sub {
 	my ($dev, $ino, $mode, $nlink, $uid, $gid);
-	(($dev, $ino, $mode, $nlink, $uid, $gid) = lstat($_))
-	  && -f _
+	return unless (($dev, $ino, $mode, $nlink, $uid, $gid) = lstat($_));
+
+	# Don't even descend into an excluded directory, nor into a build tree.
+	#
+	# Note that File::Find has chdir'd into the containing directory,
+	# so $_ is what we must test; for a directory named on the command
+	# line $_ is ".", and we process such a directory even if it is a
+	# build tree, since that was asked for explicitly.
+	if (-d _)
+	{
+		$File::Find::prune = 1
+		  if in_excluded_dir($_) || ($_ ne "." && is_build_dir($_));
+		return;
+	}
+
+	-f _
 	  && /^.*\.[ch]\z/s
 	  && push(@files, $File::Find::name);
 };
@@ -441,6 +508,10 @@ foreach my $commit (@commits)
 	chomp(@affected);
 	push(@files, @affected);
 }
+
+# remove files below excluded directories from the file list (could be
+# from command line or from --commit)
+@files = grep { !in_excluded_dir($_) } @files if @exclude_dirs;
 
 warn "No files to process" unless @files;
 
