@@ -243,6 +243,20 @@ sub in_excluded_dir
 	return 0;
 }
 
+# Does the given directory look like the top of a build tree?
+sub is_build_dir
+{
+	my $dir = shift;
+
+	# This is how Meson itself identifiers a build tree.
+	return 1 if -f "$dir/meson-private/coredata.dat";
+
+	# Autoconf VPATH build directory
+	return 1 if -f "$dir/config.status" && !-f "$dir/configure.ac";
+
+	return 0;
+}
+
 sub read_source
 {
 	my $source_filename = shift;
@@ -461,11 +475,16 @@ my $wanted = sub {
 	my ($dev, $ino, $mode, $nlink, $uid, $gid);
 	return unless (($dev, $ino, $mode, $nlink, $uid, $gid) = lstat($_));
 
-	# Don't even descend into an excluded directory.  Note that File::Find
-	# has chdir'd into the containing directory, so $_ is what we must test.
-	if (-d _ && in_excluded_dir($_))
+	# Don't even descend into an excluded directory, nor into a build tree.
+	#
+	# Note that File::Find has chdir'd into the containing directory,
+	# so $_ is what we must test; for a directory named on the command
+	# line $_ is ".", and we process such a directory even if it is a
+	# build tree, since that was asked for explicitly.
+	if (-d _)
 	{
-		$File::Find::prune = 1;
+		$File::Find::prune = 1
+		  if in_excluded_dir($_) || ($_ ne "." && is_build_dir($_));
 		return;
 	}
 
