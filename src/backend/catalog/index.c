@@ -3455,6 +3455,7 @@ validate_index(Oid heapId, Oid indexId, Snapshot snapshot)
 	ivinfo.index = indexRelation;
 	ivinfo.heaprel = heapRelation;
 	ivinfo.analyze_only = false;
+	ivinfo.is_autovacuum = false;
 	ivinfo.report_progress = true;
 	ivinfo.estimated_count = true;
 	ivinfo.message_level = DEBUG2;
