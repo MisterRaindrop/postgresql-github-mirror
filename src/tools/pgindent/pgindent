@@ -353,11 +353,14 @@ sub run_indent
 	$bak_to_cleanup = "$filename.BAK";
 
 	$$error_message = `$cmd $filename 2>&1`;
+	my $rc = $?;
 
-	return "" if ($? || length($$error_message) > 0);
-
+	# pg_bsd_indent leaves its .BAK file behind whether or not it succeeded,
+	# so get rid of it before looking at the result.
 	unlink $bak_to_cleanup;
 	$bak_to_cleanup = undef;
+
+	return "" if ($rc || length($$error_message) > 0);
 
 	open(my $src_out, '<', $filename) || die $!;
 	local ($/) = undef;
