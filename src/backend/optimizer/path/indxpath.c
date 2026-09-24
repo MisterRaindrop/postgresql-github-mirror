@@ -4466,6 +4466,43 @@ relation_removable_groupby_columns(RelOptInfo *rel, List *groupClause,
 }
 
 /*
+ * relation_has_unique_index_covered_by_group_keys
+ *		Determine whether every input row is its own group under the given
+ *		plain GROUP BY keys.
+ *
+ * The caller has already restricted this to a single base relation and a plain
+ * GROUP BY list.  Index keys may be a subset of the grouping keys, just as an
+ * immediate PK makes every row its own group regardless of what else is listed
+ * in GROUP BY.
+ */
+bool
+relation_has_unique_index_covered_by_group_keys(RelOptInfo *rel,
+												List *groupClause,
+												List *targetList)
+{
+	List	   *groupbycols;
+	ListCell   *lc;
+
+	if (groupClause == NIL)
+		return false;
+
+	Assert(bms_membership(rel->relids) == BMS_SINGLETON);
+
+	groupbycols = build_groupby_col_infos(rel, groupClause, targetList, NULL);
+	if (groupbycols == NIL)
+		return false;
+
+	foreach(lc, rel->indexlist)
+	{
+		if (unique_index_keys_match_groupby_cols(lfirst_node(IndexOptInfo, lc),
+												 rel, groupbycols, NULL))
+			return true;
+	}
+
+	return false;
+}
+
+/*
  * indexcol_is_bool_constant_for_query
  *
  * If an index column is constrained to have a constant value by the query's

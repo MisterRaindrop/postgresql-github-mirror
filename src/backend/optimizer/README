@@ -1355,7 +1355,9 @@ additional RelOptInfos during upper-level planning:
 
 UPPERREL_SETOP		result of UNION/INTERSECT/EXCEPT, if any
 UPPERREL_PARTIAL_GROUP_AGG	result of partial grouping/aggregation, if any
-UPPERREL_GROUP_AGG	result of grouping/aggregation, if any
+UPPERREL_GROUP_AGG	result of grouping/aggregation, if any; for a plain
+					GROUP BY that a unique index proves redundant, this rel
+					can also contain direct complete and partial paths
 UPPERREL_WINDOW		result of window functions, if any
 UPPERREL_PARTIAL_DISTINCT	result of partial "SELECT DISTINCT", if any
 UPPERREL_DISTINCT	result of "SELECT DISTINCT", if any
