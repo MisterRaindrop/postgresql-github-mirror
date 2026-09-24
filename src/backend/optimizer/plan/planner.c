@@ -167,11 +167,22 @@ static double get_number_of_groups(PlannerInfo *root,
 								   double path_rows,
 								   grouping_sets_data *gd,
 								   List *target_list);
+static bool grouping_input_is_singleton(PlannerInfo *root,
+										RelOptInfo *input_rel,
+										List *targetList,
+										bool setop_child);
+static void create_singleton_grouping_paths(PlannerInfo *root,
+											RelOptInfo *input_rel,
+											RelOptInfo *grouped_rel);
+static void create_singleton_partial_grouping_paths(PlannerInfo *root,
+										 RelOptInfo *input_rel,
+										 RelOptInfo *grouped_rel);
 static RelOptInfo *create_grouping_paths(PlannerInfo *root,
 										 RelOptInfo *input_rel,
 										 PathTarget *target,
 										 bool target_parallel_safe,
-										 grouping_sets_data *gd);
+										 grouping_sets_data *gd,
+										 SetOperationStmt *setops);
 static bool is_degenerate_grouping(PlannerInfo *root);
 static void create_degenerate_grouping_paths(PlannerInfo *root,
 											 RelOptInfo *input_rel,
@@ -186,6 +197,10 @@ static void create_ordinary_grouping_paths(PlannerInfo *root,
 										   grouping_sets_data *gd,
 										   GroupPathExtraData *extra,
 										   RelOptInfo **partially_grouped_rel_p);
+static void add_foreign_and_custom_grouping_paths(PlannerInfo *root,
+												  RelOptInfo *input_rel,
+												  RelOptInfo *grouped_rel,
+												  GroupPathExtraData *extra);
 static void consider_groupingsets_paths(PlannerInfo *root,
 										RelOptInfo *grouped_rel,
 										Path *path,
@@ -2058,7 +2073,8 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 												current_rel,
 												grouping_target,
 												grouping_target_parallel_safe,
-												gset_data);
+												gset_data,
+												setops);
 			/* Fix things up if grouping_target contains SRFs */
 			if (parse->hasTargetSRFs)
 				adjust_paths_for_srfs(root, current_rel,
@@ -4018,6 +4034,152 @@ get_number_of_groups(PlannerInfo *root,
 }
 
 /*
+ * grouping_input_is_singleton
+ *		Can this plain GROUP BY be implemented without a grouping node?
+ *
+ * This is intentionally narrower than the general uniqueness machinery.  The
+ * current proof accepts one ordinary base relation (or partitioned parent) and
+ * requires its immediate unique index keys to appear as simple Var grouping
+ * keys.  Additional grouping expressions are allowed and left to normal
+ * projection.  A set-operation child is rejected only when its parent asked
+ * for sorted input; a UNION ALL child may still use this local proof.
+ */
+static bool
+grouping_input_is_singleton(PlannerInfo *root, RelOptInfo *input_rel,
+							List *targetList, bool setop_child)
+{
+	Query	   *parse = root->parse;
+	Index		rti;
+	RangeTblEntry *rte;
+
+	if (setop_child || parse->groupClause == NIL ||
+		parse->groupingSets != NIL || parse->hasAggs ||
+		parse->hasWindowFuncs || parse->hasTargetSRFs ||
+		parse->distinctClause != NIL || parse->hasDistinctOn ||
+		parse->rowMarks != NIL || parse->setOperations != NULL ||
+		root->hasHavingQual || root->numOrderedAggs > 0)
+		return false;
+
+	/*
+	 * With partial retrieval, ordinary grouping can evaluate a volatile output
+	 * column only for returned groups.  Direct paths may move that projection
+	 * below LIMIT or into parallel workers, changing observable evaluation
+	 * counts.  Be conservative and keep the ordinary grouping paths in this
+	 * case.
+	 */
+	if ((limit_needed(parse) || root->tuple_fraction > 0.0) &&
+		contain_volatile_functions((Node *) targetList))
+		return false;
+
+	/* Deliberately avoid upper, join, and partitionwise-child relations. */
+	if (input_rel->reloptkind != RELOPT_BASEREL)
+		return false;
+
+	Assert(bms_membership(input_rel->relids) == BMS_SINGLETON);
+	rti = input_rel->relid;
+	rte = planner_rt_fetch(rti, root);
+	if (rte == NULL || rte->rtekind != RTE_RELATION || rte->lateral ||
+		!(rte->relkind == RELKIND_RELATION ||
+		  rte->relkind == RELKIND_PARTITIONED_TABLE))
+		return false;
+
+	/*
+	 * An old-style inheritance parent can contain the same key in more than
+	 * one child.  A partitioned table's unique constraint proves uniqueness
+	 * across all of its partitions.
+	 */
+	if (rte->inh && rte->relkind != RELKIND_PARTITIONED_TABLE)
+		return false;
+
+	/*
+	 * Use the original clause rather than processed_groupClause: equivalence
+	 * processing may remove redundant keys, but every original key remains a
+	 * valid grouping key.  The original superset can only make the unique-key
+	 * proof stronger.
+	 */
+	return relation_has_unique_index_covered_by_group_keys(input_rel,
+														   parse->groupClause,
+														   targetList);
+}
+
+/*
+ * create_singleton_grouping_paths
+ *		Put input paths directly under the grouping upper relation.
+ *
+ * The input relation was built with make_group_input_target(), so projecting
+ * each path onto grouped_rel's target produces exactly the same rows as a
+ * grouping node when every input row is its own group.  ProjectionPath keeps
+ * the input pathkeys, which lets ORDER BY continue to use an index order.
+ */
+static void
+create_singleton_grouping_paths(PlannerInfo *root, RelOptInfo *input_rel,
+								RelOptInfo *grouped_rel)
+{
+	ListCell   *lc;
+
+	foreach(lc, input_rel->pathlist)
+	{
+		Path	   *input_path = (Path *) lfirst(lc);
+
+		/*
+		 * Avoid stacking a new projection on the scan/join projection.  The
+		 * final grouped target can be computed directly from the underlying
+		 * path in the narrow case accepted by grouping_input_is_singleton().
+		 */
+		if (IsA(input_path, ProjectionPath))
+			input_path = ((ProjectionPath *) input_path)->subpath;
+
+		add_path(grouped_rel, (Path *)
+				 create_projection_path(root, grouped_rel, input_path,
+										grouped_rel->reltarget));
+	}
+}
+
+/*
+ * create_singleton_partial_grouping_paths
+ *		Expose singleton output as an alternative partial path.
+ *
+ * Ordinary grouping can preserve parallel paths by partial aggregation.  When
+ * grouping itself is redundant, projecting the input partial paths provides
+ * the same opportunity.  In particular, create_ordered_paths() can then sort
+ * such a path below Gather Merge instead of sorting the gathered result above
+ * Gather.  Parallel-restricted targets are rejected by ProjectionPath's
+ * parallel_safe calculation.
+ */
+static void
+create_singleton_partial_grouping_paths(PlannerInfo *root,
+										RelOptInfo *input_rel,
+										RelOptInfo *grouped_rel)
+{
+	ListCell   *lc;
+
+	if (!grouped_rel->consider_parallel ||
+		input_rel->partial_pathlist == NIL)
+		return;
+
+	foreach(lc, input_rel->partial_pathlist)
+	{
+		Path	   *input_path = (Path *) lfirst(lc);
+		ProjectionPath *path;
+
+		/*
+		 * As in create_singleton_grouping_paths(), avoid a ProjectionPath
+		 * stacked directly on another projection.
+		 */
+		if (IsA(input_path, ProjectionPath))
+			input_path = ((ProjectionPath *) input_path)->subpath;
+
+		path = create_projection_path(root, grouped_rel, input_path,
+									  grouped_rel->reltarget);
+
+		if (!path->path.parallel_safe)
+			continue;
+
+		add_partial_path(grouped_rel, &path->path);
+	}
+}
+
+/*
  * create_grouping_paths
  *
  * Build a new upperrel containing Paths for grouping and/or aggregation.
@@ -4039,15 +4201,14 @@ create_grouping_paths(PlannerInfo *root,
 					  RelOptInfo *input_rel,
 					  PathTarget *target,
 					  bool target_parallel_safe,
-					  grouping_sets_data *gd)
+					  grouping_sets_data *gd,
+					  SetOperationStmt *setops)
 {
 	Query	   *parse = root->parse;
 	RelOptInfo *grouped_rel;
 	RelOptInfo *partially_grouped_rel;
 	AggClauseCosts agg_costs;
-
-	MemSet(&agg_costs, 0, sizeof(AggClauseCosts));
-	get_agg_clause_costs(root, AGGSPLIT_SIMPLE, &agg_costs);
+	bool		add_singleton_paths;
 
 	/*
 	 * Create grouping relation to hold fully aggregated grouping and/or
@@ -4055,6 +4216,24 @@ create_grouping_paths(PlannerInfo *root,
 	 */
 	grouped_rel = make_grouping_rel(root, input_rel, target,
 									target_parallel_safe, parse->havingQual);
+
+	/*
+	 * A singleton proof adds alternatives; it does not remove the ordinary
+	 * grouped paths.  Adding these paths first also lets FDWs and upper-path
+	 * hooks see the complete set of core alternatives for this relation.
+	 */
+	add_singleton_paths = grouping_input_is_singleton(root, input_rel,
+													  parse->targetList,
+													  setops != NULL);
+	if (add_singleton_paths)
+	{
+		create_singleton_grouping_paths(root, input_rel, grouped_rel);
+		create_singleton_partial_grouping_paths(root, input_rel,
+												grouped_rel);
+	}
+
+	MemSet(&agg_costs, 0, sizeof(AggClauseCosts));
+	get_agg_clause_costs(root, AGGSPLIT_SIMPLE, &agg_costs);
 
 	/*
 	 * Create either paths for a degenerate grouping or paths for ordinary
@@ -4395,6 +4574,21 @@ create_ordinary_grouping_paths(PlannerInfo *root, RelOptInfo *input_rel,
 				 errmsg("could not implement GROUP BY"),
 				 errdetail("Some of the datatypes only support hashing, while others only support sorting.")));
 
+	add_foreign_and_custom_grouping_paths(root, input_rel, grouped_rel,
+										  extra);
+}
+
+/*
+ * add_foreign_and_custom_grouping_paths
+ *
+ * Give FDWs and extensions a chance to add or replace paths for the fully
+ * grouped relation.  Callers must set grouped_rel->pathlist before calling.
+ */
+static void
+add_foreign_and_custom_grouping_paths(PlannerInfo *root, RelOptInfo *input_rel,
+									  RelOptInfo *grouped_rel,
+									  GroupPathExtraData *extra)
+{
 	/*
 	 * If there is an FDW that's responsible for all baserels of the query,
 	 * let it consider adding ForeignPaths.
