@@ -841,6 +841,17 @@ pgpa_walker_would_advise(pgpa_plan_walker_context *walker,
 				return pgpa_walker_index_target_matches_plan(target->itarget, scan->plan);
 			}
 		case PGPA_TAG_PARTITIONWISE:
+			/* Match the vacuous case handled by the planner. */
+			if (target->ttype == PGPA_TARGET_IDENTIFIER ||
+				list_length(target->children) == 1)
+			{
+				RangeTblEntry *rte;
+
+				rte = rt_fetch(bms_singleton_member(relids),
+							   walker->pstmt->rtable);
+				if (!rte->inh)
+					return true;
+			}
 			return pgpa_walker_find_scan(walker,
 										 PGPA_SCAN_PARTITIONWISE,
 										 relids) != NULL;
