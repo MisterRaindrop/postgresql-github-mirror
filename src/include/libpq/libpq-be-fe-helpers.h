@@ -498,8 +498,18 @@ libpqsrv_notice_receiver(void *arg, const PGresult *res)
 	if (len > 0 && message[len - 1] == '\n')
 		len--;
 
+	/*
+	 * Don't log the local statement or context.  This runs once for every
+	 * message the remote server sends, and LOG passes the default
+	 * log_min_error_statement, so each message would otherwise repeat the
+	 * whole text of whatever local query is running.  The local context only
+	 * says where libpq happened to be reading input, not what caused the
+	 * message.
+	 */
 	ereport(LOG,
-			errmsg_internal("%s: %.*s", prefix, len, message));
+			errmsg_internal("%s: %.*s", prefix, len, message),
+			errhidestmt(true),
+			errhidecontext(true));
 }
 
 #define PGresult libpqsrv_PGresult
