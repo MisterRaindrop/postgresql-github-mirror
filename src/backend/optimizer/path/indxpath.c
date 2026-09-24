@@ -74,7 +74,6 @@ typedef struct
 	int			indexcol;		/* index column we want to match to */
 } ec_member_matches_arg;
 
-
 static void consider_index_join_clauses(PlannerInfo *root, RelOptInfo *rel,
 										IndexOptInfo *index,
 										IndexClauseSet *rclauseset,
@@ -4283,6 +4282,187 @@ relation_has_unique_index_for(PlannerInfo *root, RelOptInfo *rel,
 	}
 
 	return false;
+}
+
+/*
+ * The internal shape of one simple GROUP BY Var used when matching a unique
+ * index against GROUP BY keys.  This is not exposed outside indxpath.c.
+ */
+typedef struct GroupByColInfo
+{
+	AttrNumber	attno;			/* var->varattno */
+	List	   *eq_opfamilies;	/* mergejoin opfamilies of sgc->eqop */
+	Oid			coll;			/* var->varcollid */
+} GroupByColInfo;
+
+/*
+ * build_groupby_col_infos
+ *		Collect the simple Vars from groupClause that belong to rel.
+ *
+ * Other GROUP BY items may refine the grouping, but they cannot help an index
+ * prove uniqueness of the underlying relation.  If groupbyattnos isn't NULL,
+ * it is set to the heap attribute numbers of the collected Vars.
+ */
+static List *
+build_groupby_col_infos(RelOptInfo *rel, List *groupClause, List *targetList,
+						Bitmapset **groupbyattnos)
+{
+	List	   *infos = NIL;
+	ListCell   *lc;
+
+	if (groupbyattnos)
+		*groupbyattnos = NULL;
+
+	foreach(lc, groupClause)
+	{
+		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
+		TargetEntry *tle = get_sortgroupclause_tle(sgc, targetList);
+		Var		   *var;
+		GroupByColInfo *info;
+
+		if (tle == NULL)
+			continue;
+
+		if (!IsA(tle->expr, Var))
+			continue;
+
+		var = (Var *) tle->expr;
+		if (var->varlevelsup != 0 || var->varattno <= 0 ||
+			var->varno != rel->relid)
+			continue;
+
+		info = palloc_object(GroupByColInfo);
+		info->attno = var->varattno;
+		info->eq_opfamilies = get_mergejoin_opfamilies(sgc->eqop);
+		info->coll = var->varcollid;
+		infos = lappend(infos, info);
+
+		if (groupbyattnos)
+			*groupbyattnos = bms_add_member(*groupbyattnos,
+											var->varattno -
+											FirstLowInvalidHeapAttributeNumber);
+	}
+
+	return infos;
+}
+
+/*
+ * unique_index_keys_match_groupby_cols
+ *	  Test whether an immediate unique index proves uniqueness under the
+ *	  equality semantics of the given GROUP BY columns.
+ *
+ * For each index key column, there must be a GROUP BY Var on the same column
+ * whose mergejoin opfamilies include the index opfamily and whose collation
+ * agrees on equality.  A NULLS DISTINCT index additionally requires every key
+ * column to be NOT NULL.
+ *
+ * If index_attnos isn't NULL, it is set to the heap attribute numbers of the
+ * matched index key columns.  On a false return it may describe a partial
+ * match; callers must ignore it unless the function returns true.
+ */
+static bool
+unique_index_keys_match_groupby_cols(IndexOptInfo *index, RelOptInfo *rel,
+									 List *groupbycols,
+									 Bitmapset **index_attnos)
+{
+	if (index_attnos)
+		*index_attnos = NULL;
+
+	/*
+	 * Only an immediate, unconditional unique index proves that the input is
+	 * unique.  Expression and partial indexes cannot prove whole-relation
+	 * uniqueness.  Skip hypothetical indexes because they do not prove a
+	 * property of the physical relation.
+	 */
+	if (!index->unique || !index->immediate || index->indpred != NIL ||
+		index->indexprs != NIL || index->hypothetical)
+		return false;
+
+	for (int i = 0; i < index->nkeycolumns; i++)
+	{
+		AttrNumber	indkey = index->indexkeys[i];
+		ListCell   *lc;
+
+		if (indkey <= 0 ||
+			(!index->nullsnotdistinct &&
+			 !bms_is_member(indkey, rel->notnullattnums)))
+			return false;
+
+		foreach(lc, groupbycols)
+		{
+			GroupByColInfo *info = (GroupByColInfo *) lfirst(lc);
+
+			if (info->attno == indkey &&
+				list_member_oid(info->eq_opfamilies, index->opfamily[i]) &&
+				collations_agree_on_equality(index->indexcollations[i],
+											 info->coll))
+				break;
+		}
+		if (lc == NULL)
+			return false;
+
+		if (index_attnos)
+			*index_attnos = bms_add_member(*index_attnos,
+										   indkey -
+										   FirstLowInvalidHeapAttributeNumber);
+	}
+
+	return true;
+}
+
+/*
+ * relation_removable_groupby_columns
+ *		Return the GROUP BY Vars made redundant by a unique index.
+ *
+ * The returned bitmap contains heap attribute numbers from rel.  A unique
+ * index key must be a proper subset of rel's simple GROUP BY Vars: equal keys
+ * cannot remove any columns.  The caller owns the returned bitmap.
+ */
+Bitmapset *
+relation_removable_groupby_columns(RelOptInfo *rel, List *groupClause,
+								   List *targetList)
+{
+	List	   *groupbycols;
+	Bitmapset  *groupbyattnos;
+	Bitmapset  *best_keycolumns = NULL;
+	IndexOptInfo *best_index = NULL;
+	ListCell   *lc;
+
+	groupbycols = build_groupby_col_infos(rel, groupClause, targetList,
+										  &groupbyattnos);
+
+	if (list_length(groupbycols) < 2)
+		return NULL;
+
+	foreach(lc, rel->indexlist)
+	{
+		IndexOptInfo *index = lfirst_node(IndexOptInfo, lc);
+		Bitmapset  *index_attnos;
+
+		if (!unique_index_keys_match_groupby_cols(index, rel, groupbycols,
+												  &index_attnos))
+			continue;
+
+		/*
+		 * Only a proper subset of the GROUP BY keys can identify columns to
+		 * remove.  Prefer the index with the fewest key columns, which
+		 * removes the largest number of GROUP BY columns.
+		 */
+		if (bms_subset_compare(index_attnos, groupbyattnos) != BMS_SUBSET1)
+			continue;
+
+		if (best_index == NULL ||
+			index->nkeycolumns < best_index->nkeycolumns)
+		{
+			best_index = index;
+			best_keycolumns = index_attnos;
+		}
+	}
+
+	if (best_index == NULL)
+		return NULL;
+
+	return bms_difference(groupbyattnos, best_keycolumns);
 }
 
 /*

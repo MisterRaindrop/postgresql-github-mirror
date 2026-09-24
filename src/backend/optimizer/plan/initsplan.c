@@ -82,19 +82,6 @@ typedef struct JoinTreeItem
 									 * lateral references */
 } JoinTreeItem;
 
-/*
- * Compatibility info for one GROUP BY item, precomputed for use by
- * remove_useless_groupby_columns() when matching unique-index columns against
- * GROUP BY items.
- */
-typedef struct GroupByColInfo
-{
-	AttrNumber	attno;			/* var->varattno */
-	List	   *eq_opfamilies;	/* mergejoin opfamilies of sgc->eqop */
-	Oid			coll;			/* var->varcollid */
-} GroupByColInfo;
-
-
 static bool is_partial_agg_memory_risky(PlannerInfo *root);
 static void create_agg_clause_infos(PlannerInfo *root);
 static void create_grouping_expr_infos(PlannerInfo *root);
@@ -373,7 +360,6 @@ remove_useless_groupby_columns(PlannerInfo *root)
 {
 	Query	   *parse = root->parse;
 	Bitmapset **groupbyattnos;
-	List	  **groupbycols;
 	Bitmapset **surplusvars;
 	bool		tryremove = false;
 	ListCell   *lc;
@@ -390,20 +376,14 @@ remove_useless_groupby_columns(PlannerInfo *root)
 	/*
 	 * Scan the GROUP BY clause to find GROUP BY items that are simple Vars.
 	 * Fill groupbyattnos[k] with a bitmapset of the column attnos of RTE k
-	 * that are GROUP BY items, and groupbycols[k] with a parallel list of
-	 * GroupByColInfo records.  We need the latter so that, when checking a
-	 * unique index against this rel's GROUP BY items, we can verify that the
-	 * index's notion of equality agrees with at least one GROUP BY item per
-	 * index column.
+	 * that are GROUP BY items.
 	 */
 	groupbyattnos = palloc0_array(Bitmapset *, list_length(parse->rtable) + 1);
-	groupbycols = palloc0_array(List *, list_length(parse->rtable) + 1);
 	foreach(lc, root->processed_groupClause)
 	{
 		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
 		TargetEntry *tle = get_sortgroupclause_tle(sgc, parse->targetList);
-		Var		   *var = (Var *) tle->expr;
-		GroupByColInfo *info;
+		Var		   *var;
 
 		/*
 		 * Ignore non-Vars and Vars from other query levels.
@@ -413,8 +393,11 @@ remove_useless_groupby_columns(PlannerInfo *root)
 		 * BY items.  But it's not clear that such cases occur often enough to
 		 * be worth troubling over.
 		 */
-		if (!IsA(var, Var) ||
-			var->varlevelsup > 0)
+		if (tle == NULL || !IsA(tle->expr, Var))
+			continue;
+
+		var = (Var *) tle->expr;
+		if (var->varlevelsup > 0)
 			continue;
 
 		/* OK, remember we have this Var */
@@ -428,18 +411,13 @@ remove_useless_groupby_columns(PlannerInfo *root)
 		 */
 		tryremove |= !bms_is_empty(groupbyattnos[relid]);
 		groupbyattnos[relid] = bms_add_member(groupbyattnos[relid],
-											  var->varattno - FirstLowInvalidHeapAttributeNumber);
-
-		info = palloc_object(GroupByColInfo);
-		info->attno = var->varattno;
-		info->eq_opfamilies = get_mergejoin_opfamilies(sgc->eqop);
-		info->coll = var->varcollid;
-		groupbycols[relid] = lappend(groupbycols[relid], info);
+											  var->varattno -
+											  FirstLowInvalidHeapAttributeNumber);
 	}
 
 	/*
-	 * No Vars or didn't find multiple Vars for any relation in the GROUP BY?
-	 * If so, nothing can be removed, so don't waste more effort trying.
+	 * No relation has multiple Vars in GROUP BY?  If so, nothing can be
+	 * removed, so don't waste more effort trying.
 	 */
 	if (!tryremove)
 		return;
@@ -457,8 +435,7 @@ remove_useless_groupby_columns(PlannerInfo *root)
 		RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
 		RelOptInfo *rel;
 		Bitmapset  *relattnos;
-		Bitmapset  *best_keycolumns = NULL;
-		int32		best_nkeycolumns = PG_INT32_MAX;
+		Bitmapset  *best_keycolumns;
 
 		relid++;
 
@@ -480,105 +457,9 @@ remove_useless_groupby_columns(PlannerInfo *root)
 			continue;
 
 		rel = root->simple_rel_array[relid];
-
-		/*
-		 * Now check each index for this relation to see if there are any with
-		 * columns which are a proper subset of the grouping columns for this
-		 * relation.
-		 */
-		foreach_node(IndexOptInfo, index, rel->indexlist)
-		{
-			Bitmapset  *ind_attnos;
-			bool		index_check_ok;
-
-			/*
-			 * Skip any non-unique and deferrable indexes.  Predicate indexes
-			 * have not been checked yet, so we must skip those too as the
-			 * predOK check that's done later might fail.
-			 */
-			if (!index->unique || !index->immediate || index->indpred != NIL)
-				continue;
-
-			/* For simplicity, we currently don't support expression indexes */
-			if (index->indexprs != NIL)
-				continue;
-
-			ind_attnos = NULL;
-			index_check_ok = true;
-			for (int i = 0; i < index->nkeycolumns; i++)
-			{
-				AttrNumber	indkey_attno = index->indexkeys[i];
-				Oid			indkey_opfamily = index->opfamily[i];
-				Oid			indkey_coll = index->indexcollations[i];
-				ListCell   *lc2;
-
-				/*
-				 * We must insist that the index columns are all defined NOT
-				 * NULL otherwise duplicate NULLs could exist.  However, we
-				 * can relax this check when the index is defined with NULLS
-				 * NOT DISTINCT as there can only be 1 NULL row, therefore
-				 * functional dependency on the unique columns is maintained,
-				 * despite the NULL.
-				 */
-				if (!index->nullsnotdistinct &&
-					!bms_is_member(indkey_attno, rel->notnullattnums))
-				{
-					index_check_ok = false;
-					break;
-				}
-
-				/*
-				 * The index proves uniqueness only under its own opfamily and
-				 * collation.  Require some GROUP BY item on this column to
-				 * use a compatible eqop and collation, the same check
-				 * relation_has_unique_index_for() applies to join clauses.
-				 */
-				foreach(lc2, groupbycols[relid])
-				{
-					GroupByColInfo *info = (GroupByColInfo *) lfirst(lc2);
-
-					if (info->attno != indkey_attno)
-						continue;
-					if (list_member_oid(info->eq_opfamilies, indkey_opfamily) &&
-						collations_agree_on_equality(indkey_coll, info->coll))
-						break;
-				}
-				if (lc2 == NULL)
-				{
-					index_check_ok = false;
-					break;
-				}
-
-				ind_attnos =
-					bms_add_member(ind_attnos,
-								   indkey_attno -
-								   FirstLowInvalidHeapAttributeNumber);
-			}
-
-			if (!index_check_ok)
-				continue;
-
-			/*
-			 * Skip any indexes where the indexed columns aren't a proper
-			 * subset of the GROUP BY.
-			 */
-			if (bms_subset_compare(ind_attnos, relattnos) != BMS_SUBSET1)
-				continue;
-
-			/*
-			 * Record the attribute numbers from the index with the fewest
-			 * columns.  This allows the largest number of columns to be
-			 * removed from the GROUP BY clause.  In the future, we may wish
-			 * to consider using the narrowest set of columns and looking at
-			 * pg_statistic.stawidth as it might be better to use an index
-			 * with, say two INT4s, rather than, say, one long varlena column.
-			 */
-			if (index->nkeycolumns < best_nkeycolumns)
-			{
-				best_keycolumns = ind_attnos;
-				best_nkeycolumns = index->nkeycolumns;
-			}
-		}
+		best_keycolumns = relation_removable_groupby_columns(rel,
+															 root->processed_groupClause,
+															 parse->targetList);
 
 		/* Did we find a suitable index? */
 		if (!bms_is_empty(best_keycolumns))
@@ -591,7 +472,7 @@ remove_useless_groupby_columns(PlannerInfo *root)
 				surplusvars = palloc0_array(Bitmapset *, list_length(parse->rtable) + 1);
 
 			/* Remember the attnos of the removable columns */
-			surplusvars[relid] = bms_difference(relattnos, best_keycolumns);
+			surplusvars[relid] = best_keycolumns;
 		}
 	}
 
@@ -608,14 +489,21 @@ remove_useless_groupby_columns(PlannerInfo *root)
 		{
 			SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
 			TargetEntry *tle = get_sortgroupclause_tle(sgc, parse->targetList);
-			Var		   *var = (Var *) tle->expr;
+			Var		   *var;
+
+			if (tle == NULL || !IsA(tle->expr, Var))
+			{
+				new_groupby = lappend(new_groupby, sgc);
+				continue;
+			}
+
+			var = (Var *) tle->expr;
 
 			/*
 			 * New list must include non-Vars, outer Vars, and anything not
 			 * marked as surplus.
 			 */
-			if (!IsA(var, Var) ||
-				var->varlevelsup > 0 ||
+			if (var->varlevelsup > 0 ||
 				!bms_is_member(var->varattno - FirstLowInvalidHeapAttributeNumber,
 							   surplusvars[var->varno]))
 				new_groupby = lappend(new_groupby, sgc);
