@@ -626,6 +626,18 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 		   OldHeap->rd_rel->relkind == RELKIND_TOASTVALUE);
 
 	/*
+	 * Lock the TOAST relation too.  In the concurrent case, the decoding
+	 * worker only decodes TOAST changes stored under the relfilenumber it
+	 * sees at startup, so the relation must not be rewritten from then on.
+	 * AccessShareLock is enough for that.  A stronger lock could deadlock
+	 * with the transactions the worker waits for, so rebuild_relation()
+	 * upgrades it after the worker has started.
+	 */
+	if (OidIsValid(OldHeap->rd_rel->reltoastrelid))
+		LockRelationOid(OldHeap->rd_rel->reltoastrelid,
+						concurrent ? AccessShareLock : lmode);
+
+	/*
 	 * All predicate locks on the tuples or pages are about to be made
 	 * invalid, because we move tuples around.  Promote them to relation
 	 * locks.  Predicate locks on indexes will be promoted when they are
@@ -1032,6 +1044,11 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 		snapshot = get_initial_snapshot(decoding_worker);
 
 		PushActiveSnapshot(snapshot);
+
+		/* Now that the worker is done waiting, upgrade the TOAST lock. */
+		if (OidIsValid(OldHeap->rd_rel->reltoastrelid))
+			LockRelationOid(OldHeap->rd_rel->reltoastrelid,
+							ShareUpdateExclusiveLock);
 	}
 
 	/* for CLUSTER or REPACK USING INDEX, mark the index as the one to use */
@@ -1278,9 +1295,6 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 	PGRUsage	ru0;
 	char	   *nspname;
 	bool		concurrent = snapshot != NULL;
-	LOCKMODE	lmode;
-
-	lmode = RepackLockLevel(concurrent);
 
 	pg_rusage_init(&ru0);
 
@@ -1296,7 +1310,7 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 	Assert(newTupDesc->natts == oldTupDesc->natts);
 
 	/*
-	 * If the OldHeap has a toast table, get lock on the toast table to keep
+	 * If the OldHeap has a toast table, callers must have locked it to keep
 	 * it from being vacuumed.  This is needed because autovacuum processes
 	 * toast tables independently of their main tables, with no lock on the
 	 * latter.  If an autovacuum were to start on the toast table after we
@@ -1304,12 +1318,10 @@ copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldIndex,
 	 * possibly remove as DEAD toast tuples belonging to main tuples we think
 	 * are only RECENTLY_DEAD.  Then we'd fail while trying to copy those
 	 * tuples.
-	 *
-	 * We don't need to open the toast relation here, just lock it.  The lock
-	 * will be held till end of transaction.
 	 */
-	if (OldHeap->rd_rel->reltoastrelid)
-		LockRelationOid(OldHeap->rd_rel->reltoastrelid, lmode);
+	Assert(!OidIsValid(OldHeap->rd_rel->reltoastrelid) ||
+		   CheckRelationOidLockedByMe(OldHeap->rd_rel->reltoastrelid,
+									  RepackLockLevel(concurrent), false));
 
 	/*
 	 * If both tables have TOAST tables, perform toast swap by content.  It is
