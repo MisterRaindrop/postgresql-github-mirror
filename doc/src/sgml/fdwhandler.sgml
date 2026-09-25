@@ -1434,6 +1434,19 @@ ImportForeignStatistics(Relation relation,
     </para>
 
     <para>
+     <function>ImportForeignStatistics</function> is called with the current
+     user switched to the owner of the foreign table, within a
+     security-restricted operation, and with
+     <xref linkend="guc-search-path"/> temporarily changed to
+     <literal>pg_catalog, pg_temp</literal>, as is done when statistics are
+     calculated locally.  Thus, if the FDW needs to access a remote server,
+     it should use the user mapping for the current user (that is, the owner
+     of the foreign table), as returned by <function>GetUserId</function>.
+     Note that <function>AnalyzeForeignTable</function> is not called in
+     this environment.
+    </para>
+
+    <para>
      For reference, the logic for calculating statistics in
      <productname>PostgreSQL</productname> is found in
      <filename>src/backend/command/analyze.c</filename>.
