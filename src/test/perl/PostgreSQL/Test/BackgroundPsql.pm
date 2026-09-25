@@ -59,7 +59,7 @@ use warnings FATAL => 'all';
 use Carp;
 use Config;
 use IPC::Run;
-use PostgreSQL::Test::Utils qw(pump_until);
+use PostgreSQL::Test::Utils qw(ipc_run_text_mode pump_until);
 use Test::More;
 
 =pod
@@ -117,8 +117,8 @@ sub new
 	{
 		$run = IPC::Run::start $psql_params,
 		  '<' => \$psql->{stdin},
-		  '>' => \$psql->{stdout},
-		  '2>' => \$psql->{stderr},
+		  '>' => ipc_run_text_mode(), \$psql->{stdout},
+		  '2>' => ipc_run_text_mode(), \$psql->{stderr},
 		  $psql->{timeout};
 	}
 

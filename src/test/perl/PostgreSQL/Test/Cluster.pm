@@ -2271,8 +2271,30 @@ sub psql
 		local $@;
 		eval {
 			my @ipcrun_opts = (\@psql_params, '<' => \$sql);
-			push @ipcrun_opts, '>' => $stdout if defined $stdout;
-			push @ipcrun_opts, '2>' => $stderr if defined $stderr;
+
+			# psql output is text.  Request text mode explicitly rather than
+			# relying on IPC::Run's platform-specific default.
+			if (defined $stdout)
+			{
+				push @ipcrun_opts, '>' => PostgreSQL::Test::Utils::ipc_run_text_mode(), $stdout;
+			}
+			elsif ($PostgreSQL::Test::Utils::windows_os)
+			{
+				# Preserve pass-through behavior explicitly on Windows.
+				push @ipcrun_opts, '>' => PostgreSQL::Test::Utils::ipc_run_text_mode(),
+				  sub { print STDOUT $_[0]; };
+			}
+
+			if (defined $stderr)
+			{
+				push @ipcrun_opts, '2>' => PostgreSQL::Test::Utils::ipc_run_text_mode(), $stderr;
+			}
+			elsif ($PostgreSQL::Test::Utils::windows_os)
+			{
+				push @ipcrun_opts, '2>' => PostgreSQL::Test::Utils::ipc_run_text_mode(),
+				  sub { print STDERR $_[0]; };
+			}
+
 			push @ipcrun_opts, $timeout if defined $timeout;
 
 			IPC::Run::run @ipcrun_opts;
@@ -2789,8 +2811,8 @@ sub poll_query_until
 	{
 		my $result = IPC::Run::run $cmd,
 		  '<' => \$query,
-		  '>' => \$stdout,
-		  '2>' => \$stderr;
+		  '>' => PostgreSQL::Test::Utils::ipc_run_text_mode(), \$stdout,
+		  '2>' => PostgreSQL::Test::Utils::ipc_run_text_mode(), \$stderr;
 
 		chomp($stdout);
 		chomp($stderr);
@@ -3811,7 +3833,11 @@ sub pg_recvlogical_upto
 	{
 		local $@;
 		eval {
-			IPC::Run::run(\@cmd, '>' => \$stdout, '2>' => \$stderr, $timeout);
+			IPC::Run::run(
+				\@cmd,
+				'>' => PostgreSQL::Test::Utils::ipc_run_text_mode(), \$stdout,
+				'2>' => PostgreSQL::Test::Utils::ipc_run_text_mode(), \$stderr,
+				$timeout);
 			$ret = $?;
 		};
 		my $exc_save = $@;
@@ -3931,8 +3957,8 @@ sub create_logical_slot_on_standby
 			'--slot' => $slot_name,
 			'--create-slot'
 		],
-		'>' => \$stdout,
-		'2>' => \$stderr);
+		'>' => PostgreSQL::Test::Utils::ipc_run_text_mode(), \$stdout,
+		'2>' => PostgreSQL::Test::Utils::ipc_run_text_mode(), \$stderr);
 
 	# Arrange for the xl_running_xacts record for which pg_recvlogical is
 	# waiting.

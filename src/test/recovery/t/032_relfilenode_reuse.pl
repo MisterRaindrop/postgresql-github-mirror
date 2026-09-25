@@ -42,8 +42,8 @@ $psql_primary{run} = IPC::Run::start(
 		'--dbname' => $node_primary->connstr('postgres')
 	],
 	'<' => \$psql_primary{stdin},
-	'>' => \$psql_primary{stdout},
-	'2>' => \$psql_primary{stderr},
+	'>' => ipc_run_text_mode(), \$psql_primary{stdout},
+	'2>' => ipc_run_text_mode(), \$psql_primary{stderr},
 	$psql_timeout);
 
 my %psql_standby = ('stdin' => '', 'stdout' => '', 'stderr' => '');
@@ -54,8 +54,8 @@ $psql_standby{run} = IPC::Run::start(
 		'--dbname' => $node_standby->connstr('postgres')
 	],
 	'<' => \$psql_standby{stdin},
-	'>' => \$psql_standby{stdout},
-	'2>' => \$psql_standby{stderr},
+	'>' => ipc_run_text_mode(), \$psql_standby{stdout},
+	'2>' => ipc_run_text_mode(), \$psql_standby{stderr},
 	$psql_timeout);
 
 

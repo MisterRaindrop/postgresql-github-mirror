@@ -101,9 +101,8 @@ sub check_query
 		'--dbname' => $node_primary->connstr('postgres'),
 		'--command' => $query
 	  ],
-	  '>' => \$stdout,
-	  '2>' => \$stderr;
-
+	  '>' => ipc_run_text_mode(), \$stdout,
+	  '2>' => ipc_run_text_mode(), \$stderr;
 	is($result, 1, "$test_name: psql exit code");
 	is($stderr, '', "$test_name: psql no stderr");
 	is($stdout, $expected_stdout, "$test_name: query result matches");
