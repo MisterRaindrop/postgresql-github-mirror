@@ -3583,6 +3583,18 @@ SELECT r.a FROM remote_tbl r
                Function Call: unnest('{3,6,9}'::integer[])
 (12 rows)
 
+-- Aggregation over a foreign table joined with a function RTE: the
+-- eagerly-aggregated joinrel must not be pushed down as a foreign join.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT count(1) FROM remote_tbl, generate_series(1, 1) GROUP BY a;
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
+ Foreign Scan
+   Output: (count(*)), remote_tbl.a
+   Relations: Aggregate on ((public.remote_tbl) INNER JOIN (pg_catalog.generate_series()))
+   Remote SQL: SELECT count(*), r1.a FROM (public.base_tbl_fn r1 INNER JOIN generate_series(1, 1) f2(c1) ON (TRUE)) GROUP BY 2
+(4 rows)
+
 DROP FOREIGN TABLE remote_tbl;
 DROP TABLE base_tbl_fn;
 -- ====================================================================
