@@ -1147,11 +1147,13 @@ GinTuple
 GinTupleCollector
 GinVacuumState
 GistBuildMode
+GistCheckState
 GistEntryVector
 GistHstoreOptions
 GistInetKey
 GistNSN
 GistOptBufferingMode
+GistScanItem
 GistSortedBuildLevelState
 GistSplitUnion
 GistSplitVector
