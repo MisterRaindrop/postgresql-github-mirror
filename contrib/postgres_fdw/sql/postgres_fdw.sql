@@ -1096,6 +1096,11 @@ SELECT r.a FROM remote_tbl r
  WHERE EXISTS (SELECT 1 FROM unnest(array[3, 6, 9]) AS t(n) WHERE t.n = r.a)
  ORDER BY r.a;
 
+-- Aggregation over a foreign table joined with a function RTE: the
+-- eagerly-aggregated joinrel must not be pushed down as a foreign join.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT count(1) FROM remote_tbl, generate_series(1, 1) GROUP BY a;
+
 DROP FOREIGN TABLE remote_tbl;
 DROP TABLE base_tbl_fn;
 
