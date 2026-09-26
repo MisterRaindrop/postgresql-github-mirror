@@ -254,6 +254,13 @@ REPACK [ ( <replaceable class="parameter">option</replaceable> [, ...] ) ] USING
        are also stored separately in a temporary file, until they can be
        processed.
       </para>
+      <para>
+       Each row that other transactions update or delete during
+       <command>REPACK (CONCURRENTLY)</command> also takes a small amount of
+       backend memory, not limited by <xref linkend="guc-maintenance-work-mem"/>.
+       The command cannot complete if more than about 100 million rows are
+       changed this way.
+      </para>
      </note>
 
      <para>
