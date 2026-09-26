@@ -5014,6 +5014,45 @@ SELECT attname, inherited, null_frac, avg_width, n_distinct,
 FROM pg_stats
 WHERE schemaname = 'public' AND tablename = 'dtest_ftable';
 
+-- Statistics import must access the remote server as the foreign table's
+-- owner, not as the user running ANALYZE
+CREATE ROLE regress_simport_owner NOSUPERUSER;
+GRANT USAGE ON FOREIGN SERVER loopback TO regress_simport_owner;
+GRANT CREATE ON SCHEMA public TO regress_simport_owner;
+CREATE TABLE simport_secret (s text);
+REVOKE ALL ON simport_secret FROM PUBLIC;
+INSERT INTO simport_secret SELECT 'hunter2' FROM generate_series(1, 10);
+ANALYZE simport_secret;
+SET ROLE regress_simport_owner;
+CREATE FOREIGN TABLE simport_fsecret (s text)
+       SERVER loopback OPTIONS (table_name 'simport_secret', import_stats 'true');
+RESET ROLE;
+
+ANALYZE simport_fsecret;                  -- should fail, owner has no user mapping
+SELECT most_common_vals FROM pg_stats WHERE tablename = 'simport_fsecret';
+
+-- Functions invoked during statistics import (here a domain's CHECK
+-- constraint) must run as the foreign table's owner, with a restricted
+-- search_path, as in the sampling case
+CREATE USER MAPPING FOR regress_simport_owner SERVER loopback
+       OPTIONS (password_required 'false');
+CREATE TABLE simport_dtable (c1 int);
+INSERT INTO simport_dtable VALUES (1), (1), (2), (2);
+ANALYZE simport_dtable;
+SET ROLE regress_simport_owner;
+CREATE FUNCTION simport_check(int) RETURNS bool LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE NOTICE 'current_user: %, search_path: %',
+    current_user, current_setting('search_path');
+  RETURN true;
+END $$;
+CREATE DOMAIN simport_dom AS int CHECK (simport_check(VALUE));
+CREATE FOREIGN TABLE simport_fdtable (c1 simport_dom)
+       SERVER loopback OPTIONS (table_name 'simport_dtable', import_stats 'true');
+RESET ROLE;
+
+ANALYZE VERBOSE simport_fdtable;          -- should work
+
 -- cleanup
 DROP FOREIGN TABLE simport_ftable;
 DROP FOREIGN TABLE simport_fview;
@@ -5023,6 +5062,11 @@ DROP FOREIGN TABLE simport_fpt;
 DROP TABLE simport_pt;
 DROP FOREIGN TABLE dtest_ftable;
 DROP TABLE dtest_table;
+DROP TABLE simport_secret;
+DROP TABLE simport_dtable;
+DROP USER MAPPING FOR regress_simport_owner SERVER loopback;
+DROP OWNED BY regress_simport_owner;
+DROP ROLE regress_simport_owner;
 
 -- ===================================================================
 -- test for postgres_fdw_get_connections function with check_conn = true
