@@ -46,6 +46,7 @@
 #include "storage/bufmgr.h"
 #include "storage/proc.h"
 #include "tcop/tcopprot.h"
+#include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 
@@ -1314,6 +1315,9 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 
 	/* Prepare to track buffer usage during parallel execution */
 	InstrStartParallelQuery();
+
+	/* Used by tests to pause a worker while it is attached to the leader */
+	INJECTION_POINT("parallel-vacuum-worker-start", NULL);
 
 	/* Process indexes to perform vacuum/cleanup */
 	parallel_vacuum_process_safe_indexes(&pvs);

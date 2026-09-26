@@ -253,5 +253,57 @@ $node->safe_psql('postgres',
 $node->safe_psql('postgres',
 	"SELECT injection_points_detach('autovacuum-worker-cost-balanced')");
 
+# Test 4:
+# Check that DROP DATABASE WITH (FORCE) can terminate the parallel workers of
+# an autovacuum. They publish the bootstrap superuser as their role while
+# their leader publishes none, so a non-superuser owner of the database was
+# refused for the whole index phase of the vacuum.
+
+# Leave both worker slots to the parallel autovacuum below.
+$node->safe_psql('postgres',
+	'ALTER TABLE test_autovac SET (autovacuum_enabled = false)');
+$node->safe_psql('regress_db2',
+	'ALTER TABLE filler SET (autovacuum_enabled = false)');
+
+# Hand regress_db2 to a non-superuser that may terminate other sessions.
+$node->safe_psql(
+	'postgres', qq{
+	CREATE ROLE regress_dbowner LOGIN;
+	GRANT pg_signal_backend TO regress_dbowner;
+	ALTER DATABASE regress_db2 OWNER TO regress_dbowner;
+});
+
+# Hold the parallel workers while they are attached to their leader.
+$node->safe_psql('postgres',
+	"SELECT injection_points_attach('parallel-vacuum-worker-start', 'wait')");
+
+# A table whose autovacuum vacuums indexes in parallel.
+$node->safe_psql(
+	'regress_db2', qq{
+	CREATE TABLE dropdb_force (a int, b int, c int)
+	  WITH (autovacuum_parallel_workers = 2,
+			autovacuum_vacuum_threshold = 1,
+			autovacuum_vacuum_scale_factor = 0);
+	INSERT INTO dropdb_force SELECT g, g, g FROM generate_series(1, 1000) g;
+	CREATE INDEX ON dropdb_force (a);
+	CREATE INDEX ON dropdb_force (b);
+	CREATE INDEX ON dropdb_force (c);
+	DELETE FROM dropdb_force;
+});
+
+$node->wait_for_event('parallel worker', 'parallel-vacuum-worker-start');
+
+my ($ret, $out, $err) = $node->psql(
+	'postgres',
+	'DROP DATABASE regress_db2 WITH (FORCE)',
+	connstr => $node->connstr('postgres') . ' user=regress_dbowner');
+
+is($ret, 0, 'DROP DATABASE WITH (FORCE) ends parallel autovacuum workers');
+is($err, '', 'no error from DROP DATABASE WITH (FORCE)');
+
+# The command ended the held workers, so there is nothing left to wake up.
+$node->safe_psql('postgres',
+	"SELECT injection_points_detach('parallel-vacuum-worker-start')");
+
 $node->stop;
 done_testing();
