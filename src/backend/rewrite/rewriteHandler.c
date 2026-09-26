@@ -3366,6 +3366,20 @@ rewriteTargetView(Query *parsetree, Relation view)
 						RelationGetRelationName(view))));
 
 	/*
+	 * For now, we don't support INSERT .. ON CONFLICT .. DO SELECT on a
+	 * security-barrier view.  This would require an executor check to ensure
+	 * that conflicting rows satisfy the view quals.
+	 */
+	if (parsetree->onConflict &&
+		parsetree->onConflict->action == ONCONFLICT_SELECT &&
+		RelationIsSecurityView(view))
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("cannot insert into view \"%s\"",
+					   RelationGetRelationName(view)),
+				errdetail("INSERT ... ON CONFLICT DO SELECT is not supported on security-barrier views."));
+
+	/*
 	 * The view must be updatable, else fail.
 	 *
 	 * If we are doing INSERT/UPDATE (or MERGE containing INSERT/UPDATE), we
