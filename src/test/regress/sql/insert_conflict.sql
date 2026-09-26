@@ -145,6 +145,16 @@ insert into insertconflicttest as i values (1, 'Apple') on conflict (key) do sel
 insert into insertconflicttest as i values (1, 'Orange') on conflict (key) do select where excluded.fruit = 'Apple' returning *;
 insert into insertconflicttest as i values (1, 'Orange') on conflict (key) do select where excluded.fruit = 'Orange' returning *;
 
+--
+-- DO SELECT can bypass view quals, but not for a security-barrier view
+--
+create view insertconflicttestview2 as select * from insertconflicttest where fruit = 'Potato'; -- filters out everything
+select * from insertconflicttestview2;
+insert into insertconflicttestview2 values (1, 'Orange') on conflict (key) do select returning *; -- bypasses view quals
+alter view insertconflicttestview2 set (security_barrier=true);
+insert into insertconflicttestview2 values (1, 'Orange') on conflict (key) do select returning *; -- fails
+drop view insertconflicttestview2;
+
 drop index key_index;
 
 --
