@@ -2564,10 +2564,20 @@ lazy_vacuum_all_indexes(LVRelState *vacrel)
 	}
 	else
 	{
-		/* Outsource everything to parallel variant */
+		LVSavedErrInfo saved_err_info;
+
+		/*
+		 * Outsource everything to parallel variant. An error raised while the
+		 * leader itself processes an index gets its context from the parallel
+		 * vacuum code, so stop reporting the heap phase we came from.
+		 */
+		update_vacuum_error_info(vacrel, &saved_err_info,
+								 VACUUM_ERRCB_PHASE_UNKNOWN,
+								 InvalidBlockNumber, InvalidOffsetNumber);
 		parallel_vacuum_bulkdel_all_indexes(vacrel->pvs, old_live_tuples,
 											vacrel->num_index_scans,
 											&(vacrel->worker_usage.vacuum));
+		restore_vacuum_error_info(vacrel, &saved_err_info);
 
 		/*
 		 * Do a postcheck to consider applying wraparound failsafe now.  Note
@@ -3008,11 +3018,20 @@ lazy_cleanup_all_indexes(LVRelState *vacrel)
 	}
 	else
 	{
-		/* Outsource everything to parallel variant */
+		LVSavedErrInfo saved_err_info;
+
+		/*
+		 * Outsource everything to parallel variant. See
+		 * lazy_vacuum_all_indexes() for the error context handling.
+		 */
+		update_vacuum_error_info(vacrel, &saved_err_info,
+								 VACUUM_ERRCB_PHASE_UNKNOWN,
+								 InvalidBlockNumber, InvalidOffsetNumber);
 		parallel_vacuum_cleanup_all_indexes(vacrel->pvs, reltuples,
 											vacrel->num_index_scans,
 											estimated_count,
 											&(vacrel->worker_usage.cleanup));
+		restore_vacuum_error_info(vacrel, &saved_err_info);
 	}
 
 	/* Reset the progress counters */
