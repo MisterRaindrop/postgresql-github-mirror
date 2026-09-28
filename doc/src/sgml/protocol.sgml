@@ -3200,7 +3200,9 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
            before the transfer is even started, and might as such have a
            negative impact on the performance.  In particular, it might take
            longer before the first data
-           is streamed. Since the database files can change during the backup,
+           is streamed. For an incremental backup, each file is counted at the
+           size it will occupy in the backup rather than its size on disk.
+           Since the database files can change during the backup,
            the size is only approximate and might both grow and shrink between
            the time of approximation and the sending of the actual files.
            The default is false.
@@ -3425,8 +3427,11 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
          <term><literal>size</literal> (<type>int8</type>)</term>
          <listitem>
           <para>
-           The approximate size of the tablespace, in kilobytes (1024 bytes),
-           if progress report has been requested; otherwise it's null.
+           The approximate amount of data that will be sent for the
+           tablespace, in kilobytes (1024 bytes), if progress report has been
+           requested; otherwise it's null. For an incremental backup this can
+           be much smaller than the size of the tablespace, since files that
+           have changed only partially are sent as incremental files.
           </para>
          </listitem>
         </varlistentry>
