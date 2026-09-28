@@ -1786,3 +1786,39 @@ drop table agg_hash_1;
 drop table agg_hash_2;
 drop table agg_hash_3;
 drop table agg_hash_4;
+
+
+-- Minimal ON EMPTY: supported only for sum()/product(), implemented as a
+-- parse-time rewrite to COALESCE(call, default).  No new executor code.
+
+CREATE TABLE agg_on_empty_min(a int);
+
+-- empty input
+SELECT sum(a, -1 ON EMPTY) FROM agg_on_empty_min;
+
+INSERT INTO agg_on_empty_min VALUES (1), (2), (3), (NULL);
+
+-- non-empty: real result
+SELECT sum(a, -1 ON EMPTY) FROM agg_on_empty_min;
+
+-- non-empty, all-NULL group: same as COALESCE, fires (documented tradeoff)
+SELECT sum(a, -1 ON EMPTY) FROM agg_on_empty_min WHERE a IS NULL;
+
+-- DISTINCT and ALL work with no special-casing: dedup happens upstream of
+-- the COALESCE rewrite, entirely independent of it
+SELECT sum(DISTINCT a, 0 ON EMPTY) FROM (VALUES (5), (5), (10)) v(a);
+SELECT sum(ALL a, -1 ON EMPTY) FROM agg_on_empty_min WHERE a IS NULL;
+
+-- deparsing shows the COALESCE rewrite, not the original ON EMPTY spelling
+-- (a real limitation of this minimal approach, unlike the general patch)
+CREATE VIEW agg_on_empty_min_vw AS
+  SELECT sum(a, -1 ON EMPTY) FROM agg_on_empty_min;
+SELECT pg_get_viewdef('agg_on_empty_min_vw');
+DROP VIEW agg_on_empty_min_vw;
+
+-- error cases
+SELECT max(a, -1 ON EMPTY) FROM agg_on_empty_min;			-- not sum/product
+SELECT length('x', 'y' ON EMPTY);							-- not an aggregate at all
+SELECT sum(a, -1 ON EMPTY) OVER () FROM agg_on_empty_min;	-- not for window functions
+
+DROP TABLE agg_on_empty_min;

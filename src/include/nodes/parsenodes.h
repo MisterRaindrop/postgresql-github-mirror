@@ -455,6 +455,7 @@ typedef struct FuncCall
 	List	   *funcname;		/* qualified name of function */
 	List	   *args;			/* the arguments (list of exprs) */
 	List	   *agg_order;		/* ORDER BY (list of SortBy) */
+	Node	   *agg_on_empty;	/* ON EMPTY default expression, if any */
 	Node	   *agg_filter;		/* FILTER clause, if any */
 	struct WindowDef *over;		/* OVER clause, if any */
 	int			ignore_nulls;	/* ignore nulls for window function */
