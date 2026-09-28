@@ -3900,14 +3900,33 @@ TerminateOtherDBBackends(Oid databaseId)
 
 			if (proc != NULL)
 			{
-				if (superuser_arg(proc->roleId) && !superuser())
+				PGPROC	   *leader = proc->lockGroupLeader;
+				Oid			roleId = proc->roleId;
+
+				/*
+				 * An autovacuum worker and the parallel workers it launches
+				 * all run as the bootstrap superuser, but only the workers
+				 * publish that role here. An autovacuum worker never goes
+				 * through SetAuthenticatedUserId(), so its roleId stays
+				 * InvalidOid, while a parallel worker calls it with the
+				 * authenticated user of its leader. The checks below would
+				 * then refuse a worker whose leader they accept, so check
+				 * such a worker the way its leader is checked. The leader's
+				 * PGPROC is not recycled until its last member has exited, so
+				 * the pointer read here is the real leader.
+				 */
+				if (leader != NULL && leader != proc &&
+					leader->backendType == B_AUTOVAC_WORKER)
+					roleId = InvalidOid;
+
+				if (superuser_arg(roleId) && !superuser())
 					ereport(ERROR,
 							(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 							 errmsg("permission denied to terminate process"),
 							 errdetail("Only roles with the %s attribute may terminate processes of roles with the %s attribute.",
 									   "SUPERUSER", "SUPERUSER")));
 
-				if (!has_privs_of_role(GetUserId(), proc->roleId) &&
+				if (!has_privs_of_role(GetUserId(), roleId) &&
 					!has_privs_of_role(GetUserId(), ROLE_PG_SIGNAL_BACKEND))
 					ereport(ERROR,
 							(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
