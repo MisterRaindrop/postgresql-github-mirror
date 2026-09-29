@@ -1521,6 +1521,7 @@ JsonUniqueParsingState
 JsonUniqueStackEntry
 JsonValueExpr
 JsonValueList
+JsonValueListChunk
 JsonValueListIterator
 JsonValueType
 JsonWrapper
