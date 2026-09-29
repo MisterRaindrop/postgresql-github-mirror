@@ -2107,6 +2107,7 @@ check_functions_in_node(Node *node, check_function_callback checker,
  * uses, but may need to be revisited in future.
  */
 
+pg_attribute_no_sanitize_function()
 bool
 expression_tree_walker_impl(Node *node,
 							tree_walker_callback walker,
@@ -2754,6 +2755,7 @@ expression_tree_walker_impl(Node *node,
  * which is the bitwise OR of flag values to add or suppress visitation of
  * indicated items.  (More flag bits may be added as needed.)
  */
+pg_attribute_no_sanitize_function()
 bool
 query_tree_walker_impl(Query *query,
 					   tree_walker_callback walker,
@@ -2880,6 +2882,7 @@ range_table_walker_impl(List *rtable,
 /*
  * Some callers even want to scan the expressions in individual RTEs.
  */
+pg_attribute_no_sanitize_function()
 bool
 range_table_entry_walker_impl(RangeTblEntry *rte,
 							  tree_walker_callback walker,
@@ -3014,6 +3017,7 @@ range_table_entry_walker_impl(RangeTblEntry *rte,
  * and doing the right thing.
  */
 
+pg_attribute_no_sanitize_function()
 Node *
 expression_tree_mutator_impl(Node *node,
 							 tree_mutator_callback mutator,
@@ -3883,6 +3887,7 @@ expression_tree_mutator_impl(Node *node,
  * it to be modified in-place; they must pass QTW_DONT_COPY_QUERY in flags.
  * All modified substructure is safely copied in any case.
  */
+pg_attribute_no_sanitize_function()
 Query *
 query_tree_mutator_impl(Query *query,
 						tree_mutator_callback mutator,
@@ -3975,6 +3980,7 @@ query_tree_mutator_impl(Query *query,
  * a query's rangetable.  This is split out since it can be useful on
  * its own.
  */
+pg_attribute_no_sanitize_function()
 List *
 range_table_mutator_impl(List *rtable,
 						 tree_mutator_callback mutator,
@@ -4057,6 +4063,7 @@ range_table_mutator_impl(List *rtable,
  * the recursion when the walker's normal change of state is not appropriate
  * for the outermost Query node.
  */
+pg_attribute_no_sanitize_function()
 bool
 query_or_expression_tree_walker_impl(Node *node,
 									 tree_walker_callback walker,
@@ -4080,6 +4087,7 @@ query_or_expression_tree_walker_impl(Node *node,
  * the recursion when the mutator's normal change of state is not appropriate
  * for the outermost Query node.
  */
+pg_attribute_no_sanitize_function()
 Node *
 query_or_expression_tree_mutator_impl(Node *node,
 									  tree_mutator_callback mutator,
@@ -4111,6 +4119,7 @@ query_or_expression_tree_mutator_impl(Node *node,
  * because this is used mainly during analysis of CTEs, and only DML
  * statements can appear in CTEs.
  */
+pg_attribute_no_sanitize_function()
 bool
 raw_expression_tree_walker_impl(Node *node,
 								tree_walker_callback walker,
@@ -4868,6 +4877,7 @@ raw_expression_tree_walker_impl(Node *node,
  * The walker has already visited the current node, and so we need only
  * recurse into any sub-nodes it has.
  */
+pg_attribute_no_sanitize_function()
 bool
 planstate_tree_walker_impl(PlanState *planstate,
 						   planstate_tree_walker_callback walker,
@@ -4952,6 +4962,7 @@ planstate_tree_walker_impl(PlanState *planstate,
 /*
  * Walk a list of SubPlans (or initPlans, which also use SubPlan nodes).
  */
+pg_attribute_no_sanitize_function()
 static bool
 planstate_walk_subplans(List *plans,
 						planstate_tree_walker_callback walker,
@@ -4974,6 +4985,7 @@ planstate_walk_subplans(List *plans,
  * Walk the constituent plans of a ModifyTable, Append, MergeAppend,
  * BitmapAnd, or BitmapOr node.
  */
+pg_attribute_no_sanitize_function()
 static bool
 planstate_walk_members(PlanState **planstates, int nplans,
 					   planstate_tree_walker_callback walker,
