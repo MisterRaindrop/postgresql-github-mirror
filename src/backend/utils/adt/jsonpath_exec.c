@@ -145,13 +145,13 @@ typedef enum JsonPathExecResult
  * List (or really array) of JsonbValues.  This is the output representation
  * of jsonpath evaluation.
  *
- * The initial or "base" chunk of a list is typically a local variable in
- * a calling function.  If we need more entries than will fit in the base
- * chunk, we palloc more chunks.  For notational simplicity, those are also
- * treated as being of type JsonValueList, although they will have items[]
- * arrays that are larger than BASE_JVL_ITEMS.
+ * A JsonValueList is typically a local variable in a calling function.  It
+ * holds up to BASE_JVL_ITEMS entries in its base[] array.  If we need more
+ * entries than will fit there, we palloc extra chunks, of type
+ * JsonValueListChunk, and link them into a list.  Extra chunks are only
+ * created once base[] is full.
  *
- * Callers *must* initialize the base chunk with JsonValueListInit().
+ * Callers *must* initialize the list with JsonValueListInit().
  * Typically they should free any extra chunks when done, using
  * JsonValueListClear(), although some top-level functions skip that
  * on the assumption that the caller's context will be reset soon.
@@ -165,23 +165,31 @@ typedef enum JsonPathExecResult
  * BASE_JVL_ITEMS small to conserve stack space, but grow the extra
  * chunks aggressively.
  */
-#define BASE_JVL_ITEMS 2		/* number of items a base chunk holds */
+#define BASE_JVL_ITEMS 2		/* number of items base[] holds */
 #define MIN_EXTRA_JVL_ITEMS 16	/* min number of items an extra chunk holds */
 
-typedef struct JsonValueList
+typedef struct JsonValueListChunk
 {
 	int			nitems;			/* number of items stored in this chunk */
 	int			maxitems;		/* allocated length of items[] */
-	struct JsonValueList *next; /* => next chunk, if any */
-	struct JsonValueList *last; /* => last chunk (only valid in base chunk) */
-	JsonbValue	items[BASE_JVL_ITEMS];
+	struct JsonValueListChunk *next;	/* => next chunk, if any */
+	JsonbValue	items[FLEXIBLE_ARRAY_MEMBER];
+} JsonValueListChunk;
+
+typedef struct JsonValueList
+{
+	int			nbase;			/* number of items stored in base[] */
+	JsonValueListChunk *next;	/* => first extra chunk, if any */
+	JsonValueListChunk *last;	/* => last extra chunk, if any */
+	JsonbValue	base[BASE_JVL_ITEMS];	/* storage for the first items */
 } JsonValueList;
 
 /* State data for iterating through a JsonValueList */
 typedef struct JsonValueListIterator
 {
-	JsonValueList *chunk;		/* current chunk of list */
-	int			nextitem;		/* index of next value to return in chunk */
+	JsonValueList *list;		/* list being iterated, or NULL when done */
+	JsonValueListChunk *chunk;	/* current extra chunk, or NULL for base[] */
+	int			nextitem;		/* index of next value to return */
 } JsonValueListIterator;
 
 /* Structures for JSON_TABLE execution  */
@@ -3793,36 +3801,41 @@ setBaseObject(JsonPathExecContext *cxt, JsonbValue *jbv, int32 id)
 static void
 JsonValueListInit(JsonValueList *jvl)
 {
-	jvl->nitems = 0;
-	jvl->maxitems = BASE_JVL_ITEMS;
+	jvl->nbase = 0;
 	jvl->next = NULL;
-	jvl->last = jvl;
+	jvl->last = NULL;
 }
 
 static void
 JsonValueListClear(JsonValueList *jvl)
 {
-	JsonValueList *nxt;
+	JsonValueListChunk *nxt;
 
 	/* Release any extra chunks */
-	for (JsonValueList *chunk = jvl->next; chunk != NULL; chunk = nxt)
+	for (JsonValueListChunk *chunk = jvl->next; chunk != NULL; chunk = nxt)
 	{
 		nxt = chunk->next;
 		pfree(chunk);
 	}
 	/* ... and reset to empty */
-	jvl->nitems = 0;
-	Assert(jvl->maxitems == BASE_JVL_ITEMS);
+	jvl->nbase = 0;
 	jvl->next = NULL;
-	jvl->last = jvl;
+	jvl->last = NULL;
 }
 
 static void
 JsonValueListAppend(JsonValueList *jvl, const JsonbValue *jbv)
 {
-	JsonValueList *last = jvl->last;
+	JsonValueListChunk *last = jvl->last;
 
-	if (last->nitems < last->maxitems)
+	if (jvl->nbase < BASE_JVL_ITEMS)
+	{
+		/* there's still room in base[] */
+		Assert(last == NULL);
+		jvl->base[jvl->nbase] = *jbv;
+		jvl->nbase++;
+	}
+	else if (last != NULL && last->nitems < last->maxitems)
 	{
 		/* there's still room in the last existing chunk */
 		last->items[last->nitems] = *jbv;
@@ -3831,18 +3844,22 @@ JsonValueListAppend(JsonValueList *jvl, const JsonbValue *jbv)
 	else
 	{
 		/* need a new last chunk */
-		JsonValueList *nxt;
+		JsonValueListChunk *nxt;
 		int			nxtsize;
 
-		nxtsize = last->maxitems * 2;	/* double the size with each chunk */
+		/* double the size with each chunk */
+		nxtsize = (last != NULL ? last->maxitems : BASE_JVL_ITEMS) * 2;
 		nxtsize = Max(nxtsize, MIN_EXTRA_JVL_ITEMS);	/* but at least this */
-		nxt = palloc(offsetof(JsonValueList, items) +
+		nxt = palloc(offsetof(JsonValueListChunk, items) +
 					 nxtsize * sizeof(JsonbValue));
 		nxt->nitems = 1;
 		nxt->maxitems = nxtsize;
 		nxt->next = NULL;
 		nxt->items[0] = *jbv;
-		last->next = nxt;
+		if (last != NULL)
+			last->next = nxt;
+		else
+			jvl->next = nxt;
 		jvl->last = nxt;
 	}
 }
@@ -3851,7 +3868,7 @@ static bool
 JsonValueListIsEmpty(const JsonValueList *jvl)
 {
 	/* We need not examine extra chunks for this */
-	return (jvl->nitems == 0);
+	return (jvl->nbase == 0);
 }
 
 static bool
@@ -3859,9 +3876,9 @@ JsonValueListIsSingleton(const JsonValueList *jvl)
 {
 #if BASE_JVL_ITEMS > 1
 	/* We need not examine extra chunks in this case */
-	return (jvl->nitems == 1);
+	return (jvl->nbase == 1);
 #else
-	return (jvl->nitems == 1 && jvl->next == NULL);
+	return (jvl->nbase == 1 && jvl->next == NULL);
 #endif
 }
 
@@ -3870,17 +3887,17 @@ JsonValueListHasMultipleItems(const JsonValueList *jvl)
 {
 #if BASE_JVL_ITEMS > 1
 	/* We need not examine extra chunks in this case */
-	return (jvl->nitems > 1);
+	return (jvl->nbase > 1);
 #else
-	return (jvl->nitems == 1 && jvl->next != NULL);
+	return (jvl->nbase == 1 && jvl->next != NULL);
 #endif
 }
 
 static JsonbValue *
 JsonValueListHead(JsonValueList *jvl)
 {
-	Assert(jvl->nitems > 0);
-	return &jvl->items[0];
+	Assert(jvl->nbase > 0);
+	return &jvl->base[0];
 }
 
 /*
@@ -3890,7 +3907,8 @@ JsonValueListHead(JsonValueList *jvl)
 static void
 JsonValueListInitIterator(JsonValueList *jvl, JsonValueListIterator *it)
 {
-	it->chunk = jvl;
+	it->list = jvl;
+	it->chunk = NULL;
 	it->nextitem = 0;
 }
 
@@ -3901,16 +3919,27 @@ JsonValueListInitIterator(JsonValueList *jvl, JsonValueListIterator *it)
 static JsonbValue *
 JsonValueListNext(JsonValueListIterator *it)
 {
-	if (it->chunk == NULL)
+	if (it->list == NULL)
 		return NULL;
-	if (it->nextitem >= it->chunk->nitems)
+	if (it->chunk == NULL)
+	{
+		/* return items from base[] first */
+		if (it->nextitem < it->list->nbase)
+			return &it->list->base[it->nextitem++];
+		it->chunk = it->list->next;
+		it->nextitem = 0;
+	}
+	else if (it->nextitem >= it->chunk->nitems)
 	{
 		it->chunk = it->chunk->next;
-		if (it->chunk == NULL)
-			return NULL;
 		it->nextitem = 0;
-		Assert(it->chunk->nitems > 0);
 	}
+	if (it->chunk == NULL)
+	{
+		it->list = NULL;
+		return NULL;
+	}
+	Assert(it->nextitem < it->chunk->nitems);
 	return &it->chunk->items[it->nextitem++];
 }
 
