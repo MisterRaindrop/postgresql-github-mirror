@@ -898,6 +898,7 @@ hash_search(HTAB *hashp,
 									   foundPtr);
 }
 
+pg_attribute_no_sanitize_function()
 void *
 hash_search_with_hash_value(HTAB *hashp,
 							const void *keyPtr,
