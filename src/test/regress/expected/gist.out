@@ -387,6 +387,136 @@ select p from gist_tbl order by circle(p,1) <-> point(0,0) limit 1;
 
 select p from gist_tbl order by circle(p,1) <-> point(0,0) limit 1;
 ERROR:  lossy distance functions are not supported in index-only scans
+drop index gist_tbl_multi_index;
+-- Test that an ordering Index Scan returns the AM's ORDER BY values to a
+-- targetlist entry equal to the ORDER BY expression, instead of evaluating
+-- the expression again (amorderbyvalsexact).
+set enable_indexonlyscan = off;
+-- An expression index over a counting function proves the operator is not
+-- re-evaluated: the count stays at zero for the rows returned.
+create sequence gist_cnt_seq;
+create function gist_cnt_pt(point) returns point language plpgsql immutable
+  as $$ begin perform nextval('public.gist_cnt_seq'); return $1; end $$;
+create index gist_tbl_cnt_index on gist_tbl using gist (gist_cnt_pt(p));
+explain (verbose, costs off)
+select p, gist_cnt_pt(p) <-> point(0.201, 0.201) as dist
+  from gist_tbl order by gist_cnt_pt(p) <-> point(0.201, 0.201) limit 3;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Limit
+   Output: p, ((gist_cnt_pt(p) <-> '(0.201,0.201)'::point))
+   ->  Index Scan using gist_tbl_cnt_index on public.gist_tbl
+         Output: p, ((gist_cnt_pt(p) <-> '(0.201,0.201)'::point))
+         Order By: (gist_cnt_pt(gist_tbl.p) <-> '(0.201,0.201)'::point)
+         Order By Values Used: 1
+(6 rows)
+
+select setval('gist_cnt_seq', 1, false);
+ setval 
+--------
+      1
+(1 row)
+
+select p, gist_cnt_pt(p) <-> point(0.201, 0.201) as dist
+  from gist_tbl order by gist_cnt_pt(p) <-> point(0.201, 0.201) limit 3;
+      p      |         dist          
+-------------+-----------------------
+ (0.2,0.2)   | 0.0014142135623730963
+ (0.25,0.25) |   0.06929646455628163
+ (0.15,0.15) |   0.07212489168102787
+(3 rows)
+
+select nextval('gist_cnt_seq') - 1 as calls_during_scan;
+ calls_during_scan 
+-------------------
+                 0
+(1 row)
+
+-- Every copy of the ORDER BY expression is served from the index; an
+-- expression that merely contains it is not.
+explain (verbose, costs off)
+select gist_cnt_pt(p) <-> point(0,0) as d1,
+       (gist_cnt_pt(p) <-> point(0,0)) * 2 as d2,
+       gist_cnt_pt(p) <-> point(0,0) as d3
+  from gist_tbl order by gist_cnt_pt(p) <-> point(0,0) limit 2;
+                                                                         QUERY PLAN                                                                          
+-------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit
+   Output: ((gist_cnt_pt(p) <-> '(0,0)'::point)), (((gist_cnt_pt(p) <-> '(0,0)'::point) * '2'::double precision)), ((gist_cnt_pt(p) <-> '(0,0)'::point))
+   ->  Index Scan using gist_tbl_cnt_index on public.gist_tbl
+         Output: ((gist_cnt_pt(p) <-> '(0,0)'::point)), ((gist_cnt_pt(p) <-> '(0,0)'::point) * '2'::double precision), ((gist_cnt_pt(p) <-> '(0,0)'::point))
+         Order By: (gist_cnt_pt(gist_tbl.p) <-> '(0,0)'::point)
+         Order By Values Used: 2
+(6 rows)
+
+drop index gist_tbl_cnt_index;
+drop function gist_cnt_pt(point);
+drop sequence gist_cnt_seq;
+-- The box opclass's distance to a point is lossy, so this exercises the
+-- recheck and reorder-queue paths; the displayed values must match the
+-- operator's.
+create index gist_tbl_box_index on gist_tbl using gist (b);
+explain (verbose, costs off)
+select b, b <-> point(5.2, 5.91) as dist from gist_tbl
+  where b <@ box(point(5,5), point(6,6)) order by b <-> point(5.2, 5.91);
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Index Scan using gist_tbl_box_index on public.gist_tbl
+   Output: b, ((b <-> '(5.2,5.91)'::point))
+   Index Cond: (gist_tbl.b <@ '(6,6),(5,5)'::box)
+   Order By: (gist_tbl.b <-> '(5.2,5.91)'::point)
+   Order By Values Used: 1
+(5 rows)
+
+select b, b <-> point(5.2, 5.91) as dist from gist_tbl
+  where b <@ box(point(5,5), point(6,6)) order by b <-> point(5.2, 5.91);
+            b            |        dist        
+-------------------------+--------------------
+ (5.55,5.55),(5.55,5.55) | 0.5020956084253276
+ (5.6,5.6),(5.6,5.6)     | 0.5060632371551997
+ (5.5,5.5),(5.5,5.5)     | 0.5080354318352215
+ (5.65,5.65),(5.65,5.65) | 0.5197114584074514
+ (5.45,5.45),(5.45,5.45) |  0.523545604508337
+ (5.7,5.7),(5.7,5.7)     |   0.54230987451825
+ (5.4,5.4),(5.4,5.4)     | 0.5478138369920934
+ (5.75,5.75),(5.75,5.75) | 0.5728001396647873
+ (5.35,5.35),(5.35,5.35) | 0.5797413216254301
+ (5.8,5.8),(5.8,5.8)     | 0.6099999999999997
+ (5.3,5.3),(5.3,5.3)     | 0.6181423784210239
+ (5.85,5.85),(5.85,5.85) | 0.6527633568147031
+ (5.25,5.25),(5.25,5.25) | 0.6618912297349167
+ (5.9,5.9),(5.9,5.9)     | 0.7000714249274858
+ (5.2,5.2),(5.2,5.2)     |               0.71
+ (5.95,5.95),(5.95,5.95) |  0.751065909225016
+ (5.15,5.15),(5.15,5.15) | 0.7616429609731844
+ (6,6),(6,6)             | 0.8050465825031491
+ (5.1,5.1),(5.1,5.1)     | 0.8161494961096287
+ (5.05,5.05),(5.05,5.05) | 0.8729833904490971
+ (5,5),(5,5)             | 0.9317188417113825
+(21 rows)
+
+select count(*) filter (where dist = b <-> point(5.2, 5.91)) as same,
+       count(*) as total
+  from (select b, b <-> point(5.2, 5.91) as dist from gist_tbl
+          order by b <-> point(5.2, 5.91) limit 200) ss;
+ same | total 
+------+-------
+  200 |   200
+(1 row)
+
+-- Same, under row locking (the tuple is re-fetched by LockRows).
+select b, b <-> point(5.2, 5.91) as dist from gist_tbl
+  where b <@ box(point(5,5), point(6,6)) order by b <-> point(5.2, 5.91)
+  limit 3 for update;
+            b            |        dist        
+-------------------------+--------------------
+ (5.55,5.55),(5.55,5.55) | 0.5020956084253276
+ (5.6,5.6),(5.6,5.6)     | 0.5060632371551997
+ (5.5,5.5),(5.5,5.5)     | 0.5080354318352215
+(3 rows)
+
+drop index gist_tbl_box_index;
+reset enable_indexonlyscan;
 -- Test that an index-only scan deforms the tuple it reconstructs with the
 -- descriptor the AM formed it with, not the scan slot's descriptor.
 create temp table gist_ios_tupdesc (a inet, r numrange);

@@ -247,6 +247,15 @@ typedef struct IndexAmRoutine
 	bool		amcanorder;
 	/* does AM support ORDER BY result of an operator on indexed column? */
 	bool		amcanorderbyop;
+
+	/*
+	 * When an ordering scan reports xs_recheckorderby = false, may the
+	 * executor substitute the AM's xs_orderbyvals for an identical ORDER BY
+	 * expression in the scan's target list, rather than re-evaluating it?
+	 * Setting this asserts that the value the AM reports IS the value the
+	 * query should display.  See nodeIndexscan.c.
+	 */
+	bool		amorderbyvalsexact;
 	/* does AM support hashing using API consistent with the hash AM? */
 	bool		amcanhash;
 	/* do operators within an opfamily have consistent equality semantics? */
