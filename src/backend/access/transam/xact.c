@@ -3044,7 +3044,6 @@ AbortTransaction(void)
 		AtEOXact_PgStat(false, is_parallel_worker);
 		AtEOXact_ApplyLauncher(false);
 		AtEOXact_LogicalRepWorkers(false);
-		AtEOXact_LogicalCtl();
 		pgstat_report_xact_timestamp(0);
 	}
 
@@ -3074,6 +3073,13 @@ CleanupTransaction(void)
 	 */
 	AtCleanup_Portals();		/* now safe to release portal memory */
 	AtEOXact_Snapshot(false, true); /* and release the transaction's snapshots */
+
+	/*
+	 * Apply any pending XLogLogicalInfo update. This is done here rather than
+	 * in AbortTransaction(), as a failed transaction block keeps its XID
+	 * until we get here. See AtEOXact_LogicalCtl().
+	 */
+	AtEOXact_LogicalCtl();
 
 	CurrentResourceOwner = NULL;	/* and resource owner */
 	if (TopTransactionResourceOwner)
