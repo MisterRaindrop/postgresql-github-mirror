@@ -109,6 +109,8 @@ typedef struct IndexAmRoutine
     bool        amcanorder;
     /* does AM support ORDER BY result of an operator on indexed column? */
     bool        amcanorderbyop;
+    /* are the AM's non-rechecked ORDER BY values exact enough to display? */
+    bool        amorderbyvalsexact;
     /* does AM support hashing using API consistent with the hash AM? */
     bool        amcanhash;
     /* do operators within an opfamily have consistent equality semantics? */
@@ -988,6 +990,23 @@ amtranslatecmptype (CompareType cmptype, Oid opfamily, Oid opcintype);
        <replaceable>operator</replaceable> <replaceable>constant</replaceable>.  Scan modifiers
        of that form can be passed to <function>amrescan</function> as described
        previously.
+      </para>
+      <para>
+       Such an access method returns each entry's ordering values in
+       <literal>scan-&gt;xs_orderbyvals</literal>, and sets
+       <literal>scan-&gt;xs_recheckorderby</literal> to true when those values are
+       only approximations that the executor must recompute from the heap
+       tuple.  If the access method also sets
+       <structfield>amorderbyvalsexact</structfield> to true, it promises that
+       whenever <literal>xs_recheckorderby</literal> is false, the values in
+       <literal>xs_orderbyvals</literal> are the values the query should see;
+       the executor may then return them directly for a target list entry
+       that is the same expression as the <literal>ORDER BY</literal> key,
+       instead of evaluating the operator again.  An access method whose
+       ordering values differ from what the operator would compute on the
+       heap tuple (because they are approximate, or depend on index-wide
+       state) must leave this false unless it intends that difference to be
+       visible.
       </para>
      </listitem>
     </itemizedlist>

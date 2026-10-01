@@ -283,10 +283,10 @@ SET enable_bitmapscan = OFF;
 EXPLAIN (COSTS OFF)
 SELECT rank() OVER (ORDER BY p <-> point '123,456') n, p <-> point '123,456' dist, id
 FROM quad_poly_tbl WHERE p <@ polygon '((300,300),(400,600),(600,500),(700,200))';
-                                   QUERY PLAN                                    
----------------------------------------------------------------------------------
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
  WindowAgg
-   Window: w1 AS (ORDER BY (p <-> '(123,456)'::point) ROWS UNBOUNDED PRECEDING)
+   Window: w1 AS (ORDER BY ((p <-> '(123,456)'::point)) ROWS UNBOUNDED PRECEDING)
    ->  Index Scan using quad_poly_tbl_idx on quad_poly_tbl
          Index Cond: (p <@ '((300,300),(400,600),(600,500),(700,200))'::polygon)
          Order By: (p <-> '(123,456)'::point)

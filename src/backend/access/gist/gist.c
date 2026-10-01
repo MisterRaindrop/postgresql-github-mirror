@@ -65,6 +65,7 @@ gisthandler(PG_FUNCTION_ARGS)
 		.amoptsprocnum = GIST_OPTIONS_PROC,
 		.amcanorder = false,
 		.amcanorderbyop = true,
+		.amorderbyvalsexact = true,
 		.amcanhash = false,
 		.amconsistentequality = false,
 		.amconsistentordering = false,

@@ -1434,6 +1434,7 @@ typedef struct IndexOptInfo
 	 * (IndexAmRoutine).  These fields are not set for partitioned indexes.
 	 */
 	bool		amcanorderbyop;
+	bool		amorderbyvalsexact;
 	bool		amoptionalkey;
 	bool		amsearcharray;
 	bool		amsearchnulls;
