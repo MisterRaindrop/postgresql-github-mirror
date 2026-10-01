@@ -768,6 +768,69 @@ DROP SUBSCRIPTION sub_drop_refresh;
 		qq{DROP PUBLICATION pub_drop_refresh, pub_seq_drop_refresh;});
 }
 
+# =============================================================================
+# ALTER PUBLICATION ... SET (publish = ...) can widen which actions a
+# publication requires a replica identity for, on tables that are already
+# members and do not change membership at all. This is the same race as FOR
+# ALL TABLES / TABLES IN SCHEMA widening membership itself, and is closed the
+# same way: CheckCmdReplicaIdentity() already takes RowExclusiveLock on the
+# publication catalog unconditionally for any relation without a local
+# replica identity, so AlterPublicationOptions() only needs to take the
+# conflicting ShareRowExclusiveLock on the same object when pubupdate or
+# pubdelete is turned on.
+# =============================================================================
+
+$node_publisher->safe_psql(
+	'postgres', qq{
+	CREATE TABLE tab_pubrace_options (id int, val int);
+	INSERT INTO tab_pubrace_options VALUES (1, 1);
+	CREATE PUBLICATION pub_pubrace_options FOR TABLE tab_pubrace_options
+		WITH (publish = 'insert');
+});
+
+# Hold an UPDATE open on a table with no replica identity, currently
+# published for insert only, so the UPDATE is allowed under the old
+# definition.
+my $options_dml = $node_publisher->background_psql('postgres');
+$options_dml->query_safe(
+	"BEGIN;UPDATE tab_pubrace_options SET val = 2 WHERE id = 1;");
+
+# Issue the DDL without waiting for it: it must not be able to commit while
+# the UPDATE is in progress.
+my $options_ddl = $node_publisher->background_psql('postgres');
+$options_ddl->query_until(
+	qr/issued/, q{
+	\echo issued
+	ALTER PUBLICATION pub_pubrace_options SET (publish = 'insert, update');
+});
+
+ok( $node_publisher->poll_query_until(
+		'postgres', qq{
+	SELECT EXISTS (SELECT 1 FROM pg_locks
+		WHERE relation = 'pg_publication'::regclass
+		  AND mode = 'ShareRowExclusiveLock'
+		  AND NOT granted)}),
+	'ALTER PUBLICATION SET (publish = ...) waits for a concurrent data-modifying statement'
+);
+
+$options_dml->query_safe('COMMIT');
+$options_dml->quit;
+$options_ddl->query_until(qr/finished/, "\\echo finished\n");
+$options_ddl->quit;
+
+# The publication now publishes updates for a table with no replica
+# identity: further UPDATEs must be rejected.
+($ret, $stdout, $stderr) = $node_publisher->psql('postgres',
+	'UPDATE tab_pubrace_options SET val = 3 WHERE id = 1');
+ok( $stderr =~
+	  qr/cannot update table "tab_pubrace_options" because it does not have a replica identity and publishes updates/,
+	'UPDATE is correctly rejected once SET (publish = ...) covers updates for the table'
+);
+
+# Clean up
+$node_publisher->safe_psql('postgres',
+	'DROP PUBLICATION pub_pubrace_options; DROP TABLE tab_pubrace_options;');
+
 $node_publisher->stop('fast');
 $node_subscriber->stop('fast');
 
@@ -880,6 +943,153 @@ is( $node_subscriber->safe_psql(
 $node_subscriber->safe_psql('postgres', 'DROP SUBSCRIPTION sub_pubrace');
 $node_publisher->safe_psql('postgres',
 	'DROP PUBLICATION pub_pubrace_sync, pub_pubrace_filtered');
+
+# =============================================================================
+# FOR ALL TABLES and TABLES IN SCHEMA publication DDL cannot name every
+# affected table up front, so it cannot take the per-table
+# ShareRowExclusiveLock used above. Instead it locks a single object scoped to
+# what it affects (the schema, or the publication catalog itself when even the
+# schema isn't known, as with FOR ALL TABLES), and CheckCmdReplicaIdentity()
+# takes a matching lock, on the same object, before trusting the publication
+# descriptor for a table with no local replica identity. This interlock does
+# not require any subscriber; it is verified directly against pg_locks.
+# =============================================================================
+
+# --- TABLES IN SCHEMA ---
+
+$node_publisher->safe_psql(
+	'postgres', qq{
+	CREATE SCHEMA sch_pubrace;
+	CREATE TABLE sch_pubrace.tab_pubrace_schema (id int, val int);
+	INSERT INTO sch_pubrace.tab_pubrace_schema VALUES (1, 1);
+	CREATE PUBLICATION pub_pubrace_schema;
+});
+
+# Hold an UPDATE open on a table with no replica identity, not yet covered by
+# any publication.
+my $schema_dml = $node_publisher->background_psql('postgres');
+$schema_dml->query_safe(
+	"BEGIN;UPDATE sch_pubrace.tab_pubrace_schema SET val = 2 WHERE id = 1;"
+);
+
+# Issue the DDL without waiting for it: it must not be able to commit while
+# the UPDATE is in progress.
+my $schema_ddl = $node_publisher->background_psql('postgres');
+$schema_ddl->query_until(
+	qr/issued/, q{
+	\echo issued
+	ALTER PUBLICATION pub_pubrace_schema ADD TABLES IN SCHEMA sch_pubrace;
+});
+
+ok( $node_publisher->poll_query_until(
+		'postgres', qq{
+	SELECT EXISTS (SELECT 1 FROM pg_locks
+		WHERE locktype = 'object'
+		  AND classid = 'pg_namespace'::regclass
+		  AND objid = 'sch_pubrace'::regnamespace
+		  AND mode = 'ShareRowExclusiveLock'
+		  AND NOT granted)}),
+	'ALTER PUBLICATION ADD TABLES IN SCHEMA waits for a concurrent data-modifying statement'
+);
+
+$schema_dml->query_safe('COMMIT');
+$schema_dml->quit;
+$schema_ddl->query_until(qr/finished/, "\\echo finished\n");
+$schema_ddl->quit;
+
+# The table is now covered by the publication and has no replica identity:
+# further UPDATEs must be rejected, proving the DDL's effect was not missed.
+($ret, $stdout, $stderr) = $node_publisher->psql('postgres',
+	'UPDATE sch_pubrace.tab_pubrace_schema SET val = 3 WHERE id = 1');
+ok( $stderr =~
+	  qr/cannot update table "tab_pubrace_schema" because it does not have a replica identity and publishes updates/,
+	'UPDATE is correctly rejected once TABLES IN SCHEMA covers the table');
+
+# Clean up
+$node_publisher->safe_psql('postgres',
+	'DROP PUBLICATION pub_pubrace_schema; DROP SCHEMA sch_pubrace CASCADE;');
+
+# --- FOR ALL TABLES, via CREATE PUBLICATION ---
+
+$node_publisher->safe_psql(
+	'postgres', qq{
+	CREATE TABLE tab_pubrace_all (id int, val int);
+	INSERT INTO tab_pubrace_all VALUES (1, 1);
+});
+
+my $all_dml = $node_publisher->background_psql('postgres');
+$all_dml->query_safe(
+	"BEGIN;UPDATE tab_pubrace_all SET val = 2 WHERE id = 1;");
+
+my $all_ddl = $node_publisher->background_psql('postgres');
+$all_ddl->query_until(
+	qr/issued/, q{
+	\echo issued
+	CREATE PUBLICATION pub_pubrace_all FOR ALL TABLES;
+});
+
+ok( $node_publisher->poll_query_until(
+		'postgres', qq{
+	SELECT EXISTS (SELECT 1 FROM pg_locks
+		WHERE relation = 'pg_publication'::regclass
+		  AND mode = 'ShareRowExclusiveLock'
+		  AND NOT granted)}),
+	'CREATE PUBLICATION FOR ALL TABLES waits for a concurrent data-modifying statement'
+);
+
+$all_dml->query_safe('COMMIT');
+$all_dml->quit;
+$all_ddl->query_until(qr/finished/, "\\echo finished\n");
+$all_ddl->quit;
+
+($ret, $stdout, $stderr) = $node_publisher->psql('postgres',
+	'UPDATE tab_pubrace_all SET val = 3 WHERE id = 1');
+ok( $stderr =~
+	  qr/cannot update table "tab_pubrace_all" because it does not have a replica identity and publishes updates/,
+	'UPDATE is correctly rejected once FOR ALL TABLES covers the table');
+
+$node_publisher->safe_psql('postgres', 'DROP PUBLICATION pub_pubrace_all');
+
+# --- FOR ALL TABLES, via ALTER PUBLICATION ... SET ALL TABLES ---
+
+$node_publisher->safe_psql('postgres',
+	'CREATE PUBLICATION pub_pubrace_setall');
+
+my $setall_dml = $node_publisher->background_psql('postgres');
+$setall_dml->query_safe(
+	"BEGIN;UPDATE tab_pubrace_all SET val = 4 WHERE id = 1;");
+
+my $setall_ddl = $node_publisher->background_psql('postgres');
+$setall_ddl->query_until(
+	qr/issued/, q{
+	\echo issued
+	ALTER PUBLICATION pub_pubrace_setall SET ALL TABLES;
+});
+
+ok( $node_publisher->poll_query_until(
+		'postgres', qq{
+	SELECT EXISTS (SELECT 1 FROM pg_locks
+		WHERE relation = 'pg_publication'::regclass
+		  AND mode = 'ShareRowExclusiveLock'
+		  AND NOT granted)}),
+	'ALTER PUBLICATION SET ALL TABLES waits for a concurrent data-modifying statement'
+);
+
+$setall_dml->query_safe('COMMIT');
+$setall_dml->quit;
+$setall_ddl->query_until(qr/finished/, "\\echo finished\n");
+$setall_ddl->quit;
+
+($ret, $stdout, $stderr) = $node_publisher->psql('postgres',
+	'UPDATE tab_pubrace_all SET val = 5 WHERE id = 1');
+ok( $stderr =~
+	  qr/cannot update table "tab_pubrace_all" because it does not have a replica identity and publishes updates/,
+	'UPDATE is correctly rejected once ALTER PUBLICATION SET ALL TABLES covers the table'
+);
+
+# Clean up
+$node_publisher->safe_psql('postgres',
+	'DROP PUBLICATION pub_pubrace_setall; DROP TABLE tab_pubrace_all;');
 
 $node_publisher->stop('fast');
 $node_subscriber->stop('fast');
