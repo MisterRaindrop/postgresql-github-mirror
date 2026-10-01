@@ -37,7 +37,11 @@ step "s3_commit" { COMMIT; }
 # Expect to get one insert change. LOGICAL_REP_MSG_INSERT = 'I'
 permutation "s1_insert_tbl1" "s1_begin" "s1_insert_tbl1" "s2_alter_pub_add_tbl" "s1_commit" "s1_insert_tbl1" "s2_get_binary_changes"
 
-# Expect to get one insert change with LOGICAL_REP_MSG_INSERT = 'I' from
-# the second "s1_insert_tbl1" executed after adding the table tbl1 to the
-# publication in "s2_alter_pub_add_tbl".
+# ALTER PUBLICATION ... ADD TABLE takes a lock that conflicts with the
+# RowExclusiveLock held by s1's and s3's open transactions, so it has to
+# wait for both to commit. That makes its own commit happen strictly
+# after s1_commit and s3_commit, so every insert in this permutation --
+# including the second "s1_insert_tbl1", despite appearing after
+# "s2_alter_pub_add_tbl" in this list -- actually commits before tbl1 is
+# added to the publication. Expect to get no insert changes.
 permutation "s1_begin" "s1_insert_tbl1" "s3_begin" "s3_insert_tbl1" "s2_alter_pub_add_tbl" "s1_insert_tbl1" "s1_commit" "s3_commit" "s2_get_binary_changes"

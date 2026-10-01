@@ -24,6 +24,7 @@
 #include "access/xact.h"
 #include "access/heapam.h"
 #include "catalog/pg_am_d.h"
+#include "catalog/pg_namespace.h"
 #include "commands/trigger.h"
 #include "executor/executor.h"
 #include "executor/nodeModifyTable.h"
@@ -1029,6 +1030,7 @@ void
 CheckCmdReplicaIdentity(Relation rel, CmdType cmd)
 {
 	PublicationDesc pubdesc;
+	bool		has_local_identity;
 
 	/*
 	 * Skip checking the replica identity for partitioned tables, because the
@@ -1040,6 +1042,31 @@ CheckCmdReplicaIdentity(Relation rel, CmdType cmd)
 	/* We only need to do checks for UPDATE and DELETE. */
 	if (cmd != CMD_UPDATE && cmd != CMD_DELETE)
 		return;
+
+	/* If relation has replica identity we are always good. */
+	has_local_identity = OidIsValid(RelationGetReplicaIndex(rel)) ||
+		rel->rd_rel->relreplident == REPLICA_IDENTITY_FULL;
+
+	/*
+	 * A table without a local replica identity can race with publication DDL
+	 * that can make the table require one, such as FOR ALL TABLES or TABLES
+	 * IN SCHEMA. The publication definition seen by this statement may be
+	 * stale if the DDL runs concurrently.
+	 *
+	 * Take locks on the table's schema and the publication catalog before
+	 * checking the publication definition. These locks conflict with the
+	 * corresponding publication DDL and ensure that any pending catalog
+	 * invalidations are processed before building the descriptor.
+	 *
+	 * Tables with a local replica identity are not affected by this race,
+	 * so no additional locking is needed for them.
+	 */
+	if (!has_local_identity)
+	{
+		LockDatabaseObject(NamespaceRelationId, RelationGetNamespace(rel), 0,
+						   RowExclusiveLock);
+		LockRelationOid(PublicationRelationId, RowExclusiveLock);
+	}
 
 	/*
 	 * It is only safe to execute UPDATE/DELETE if the relation does not
@@ -1102,12 +1129,7 @@ CheckCmdReplicaIdentity(Relation rel, CmdType cmd)
 						RelationGetRelationName(rel)),
 				 errdetail("Replica identity must not contain unpublished generated columns.")));
 
-	/* If relation has replica identity we are always good. */
-	if (OidIsValid(RelationGetReplicaIndex(rel)))
-		return;
-
-	/* REPLICA IDENTITY FULL is also good for UPDATE/DELETE. */
-	if (rel->rd_rel->relreplident == REPLICA_IDENTITY_FULL)
+	if (has_local_identity)
 		return;
 
 	/*

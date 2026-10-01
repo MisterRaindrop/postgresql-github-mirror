@@ -940,6 +940,17 @@ CreatePublication(ParseState *pstate, CreatePublicationStmt *stmt)
 
 	if (stmt->for_all_tables)
 	{
+		/*
+		 * Prevent concurrent data-modifying statements from relying on the
+		 * publication not yet covering the table. CheckCmdReplicaIdentity()
+		 * takes RowExclusiveLock on the same object, so this
+		 * ShareRowExclusiveLock conflicts with it.
+		 *
+		 * We cannot lock all existing tables because FOR ALL TABLES also covers
+		 * tables created after this point.
+		 */
+		LockRelationOid(PublicationRelationId, ShareRowExclusiveLock);
+
 		/* Process EXCEPT table list */
 		if (exceptrelations != NIL)
 		{
@@ -1135,6 +1146,18 @@ AlterPublicationOptions(ParseState *pstate, AlterPublicationStmt *stmt,
 
 	if (publish_given)
 	{
+		/*
+		 * Enabling pubupdate or pubdelete can race with a concurrent UPDATE or
+		 * DELETE on a table without a local replica identity. The statement
+		 * maypass the replica identity check before this change takes effect.
+		 *
+		 * Take the same lock as CheckCmdReplicaIdentity() to prevent this
+		 * race.
+		 */
+		if ((pubactions.pubupdate && !pubform->pubupdate) ||
+			(pubactions.pubdelete && !pubform->pubdelete))
+			LockRelationOid(PublicationRelationId, ShareRowExclusiveLock);
+
 		values[Anum_pg_publication_pubinsert - 1] = BoolGetDatum(pubactions.pubinsert);
 		replaces[Anum_pg_publication_pubinsert - 1] = true;
 
@@ -1398,7 +1421,7 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 				oldrel->columns = NIL;
 				oldrel->except = false;
 				oldrel->relation = table_open(oldrelid,
-											  ShareUpdateExclusiveLock);
+											  ShareRowExclusiveLock);
 				delrels = lappend(delrels, oldrel);
 			}
 		}
@@ -1619,6 +1642,17 @@ AlterPublicationAllFlags(AlterPublicationStmt *stmt, Relation rel,
 	/* Update FOR ALL TABLES flag if changed */
 	if (stmt->for_all_tables != pubform->puballtables)
 	{
+		/*
+		 * Only widening (false -> true) needs to block concurrent
+		 * data-modifying statements, since they may have already passed the
+		 * replica identity check using the old publication definition.
+		 *
+		 * Lock the publication catalog once rather than locking each affected
+		 * table, since the change can affect an unbounded set of tables.
+		 */
+		if (stmt->for_all_tables)
+			LockRelationOid(PublicationRelationId, ShareRowExclusiveLock);
+
 		values[Anum_pg_publication_puballtables - 1] =
 			BoolGetDatum(stmt->for_all_tables);
 		replaces[Anum_pg_publication_puballtables - 1] = true;
@@ -1831,8 +1865,20 @@ RemovePublicationSchemaById(Oid psoid)
 
 /*
  * Open relations specified by a PublicationTable list.
- * The returned tables are locked in ShareUpdateExclusiveLock mode in order to
- * add them to a publication.
+ *
+ * The returned tables are locked in ShareRowExclusiveLock mode in order to add
+ * them to a publication.  The lock must conflict with RowExclusiveLock. Adding
+ * a table to a publication, or changing its row filter or column list, can
+ * affect both whether an UPDATE or DELETE is allowed and what tuple data is
+ * written to WAL. These decisions use the publication definition from the
+ * catalog snapshot taken at statement start and cannot be changed after the
+ * WAL is written. Logical decoding, however, uses the publication definition
+ * visible at commit time. Allowing this DDL to commit while a modification
+ * is in progress could therefore make WAL logging and logical decoding use
+ * different publication definitions. RowExclusiveLock is used by data
+ * modifications, so conflicting with it ensures that writers are blocked
+ * while the DDL runs and keeps the publication definition consistent for
+ * the entire modification. Readers are unaffected.
  */
 static List *
 OpenTableList(List *tables)
@@ -1857,7 +1903,7 @@ OpenTableList(List *tables)
 		/* Allow query cancel in case this takes a long time */
 		CHECK_FOR_INTERRUPTS();
 
-		rel = table_openrv(t->relation, ShareUpdateExclusiveLock);
+		rel = table_openrv(t->relation, ShareRowExclusiveLock);
 		myrelid = RelationGetRelid(rel);
 
 		/*
@@ -1883,7 +1929,7 @@ OpenTableList(List *tables)
 						 errmsg("conflicting or redundant column lists for table \"%s\"",
 								RelationGetRelationName(rel))));
 
-			table_close(rel, ShareUpdateExclusiveLock);
+			table_close(rel, ShareRowExclusiveLock);
 			continue;
 		}
 
@@ -1912,7 +1958,7 @@ OpenTableList(List *tables)
 			List	   *children;
 			ListCell   *child;
 
-			children = find_all_inheritors(myrelid, ShareUpdateExclusiveLock,
+			children = find_all_inheritors(myrelid, ShareRowExclusiveLock,
 										   NULL);
 
 			foreach(child, children)
@@ -2000,8 +2046,18 @@ CloseTableList(List *rels)
 }
 
 /*
- * Lock the schemas specified in the schema list in AccessShareLock mode in
- * order to prevent concurrent schema deletion.
+ * Lock the schemas specified in the schema list in ShareRowExclusiveLock mode
+ * in order to prevent concurrent schema deletion.
+ *
+ * ShareRowExclusiveLock, rather than AccessShareLock, is required because a
+ * data-modifying statement on a table in this schema may currently be
+ * relying on the schema not yet being part of any publication that requires
+ * a replica identity. Enumerating and locking every table in the schema
+ * instead does not scale to schemas with many tables, so we lock the schema
+ * itself: this conflicts with the RowExclusiveLock such a statement takes
+ * on the same object (see CheckCmdReplicaIdentity()), forcing this DDL to
+ * wait for it to finish and forcing the statement, if it starts afterward,
+ * to see this schema's post-DDL publication membership.
  */
 static void
 LockSchemaList(List *schemalist)
@@ -2014,7 +2070,7 @@ LockSchemaList(List *schemalist)
 
 		/* Allow query cancel in case this takes a long time */
 		CHECK_FOR_INTERRUPTS();
-		LockDatabaseObject(NamespaceRelationId, schemaid, 0, AccessShareLock);
+		LockDatabaseObject(NamespaceRelationId, schemaid, 0, ShareRowExclusiveLock);
 
 		/*
 		 * It is possible that by the time we acquire the lock on schema,
