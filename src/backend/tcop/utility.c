@@ -1315,6 +1315,7 @@ ProcessUtilitySlow(ParseState *pstate,
 						atcontext.relid = relid;
 						atcontext.params = params;
 						atcontext.queryEnv = queryEnv;
+						atcontext.isTopLevel = isTopLevel;
 
 						/* ... ensure we have an event trigger context ... */
 						EventTriggerAlterTableStart(parsetree);
