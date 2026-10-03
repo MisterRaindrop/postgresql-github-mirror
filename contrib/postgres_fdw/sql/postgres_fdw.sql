@@ -1658,6 +1658,8 @@ ALTER FOREIGN TABLE ft1 ALTER COLUMN c8 TYPE user_enum;
 -- ===================================================================
 -- subtransaction
 --  + local/remote error doesn't break cursor
+--  + cursors opened before a savepoint are disallowed to be first
+--    fetched within it
 -- ===================================================================
 BEGIN;
 DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
@@ -1672,6 +1674,34 @@ ROLLBACK TO s;
 FETCH c;
 SELECT * FROM ft1 ORDER BY c1 LIMIT 1;
 COMMIT;
+
+-- first fetch within a savepoint is fine if remote savepoint level is
+-- not advanced beyond the one the cursor was created in
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+SAVEPOINT s;
+FETCH c;
+ROLLBACK TO s;
+FETCH c;
+COMMIT;
+
+-- ... but not otherwise
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+SAVEPOINT s;
+SELECT count(*) FROM ft1;
+FETCH c;
+ABORT;
+
+-- a cursor created in a released savepoint is handed to its parent
+BEGIN;
+SAVEPOINT s1;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+RELEASE s1;
+SAVEPOINT s2;
+SELECT count(*) FROM ft1;
+FETCH c;
+ABORT;
 
 -- ===================================================================
 -- test handling of collations
