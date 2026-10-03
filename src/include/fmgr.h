@@ -823,6 +823,7 @@ extern int	AggCheckCallContext(FunctionCallInfo fcinfo,
 extern Aggref *AggGetAggref(FunctionCallInfo fcinfo);
 extern MemoryContext AggGetTempMemoryContext(FunctionCallInfo fcinfo);
 extern bool AggStateIsShared(FunctionCallInfo fcinfo);
+extern int	AggGetWorkMem(FunctionCallInfo fcinfo);
 extern void AggRegisterCallback(FunctionCallInfo fcinfo,
 								ExprContextCallbackFunction func,
 								Datum arg);

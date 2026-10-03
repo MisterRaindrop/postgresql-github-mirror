@@ -1946,6 +1946,10 @@ ExplainNode(PlanState *planstate, List *ancestors,
 	if (es->verbose)
 		show_plan_tlist(planstate, ancestors, es);
 
+	/* node's own working-memory limit, if one was set */
+	if (es->verbose && plan->workmem > 0)
+		ExplainPropertyInteger("Work Mem", "kB", plan->workmem, es);
+
 	/* unique join */
 	switch (nodeTag(plan))
 	{

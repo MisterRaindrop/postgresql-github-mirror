@@ -330,6 +330,9 @@ typedef struct ExprContext
 
 	/* Functions to call back when ExprContext is shut down or rescanned */
 	ExprContext_CB *ecxt_callbacks;
+
+	/* working memory (kB) of the plan node, or 0 to use work_mem */
+	int			ecxt_workmem;
 } ExprContext;
 
 /*

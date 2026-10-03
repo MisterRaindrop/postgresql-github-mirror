@@ -555,5 +555,6 @@ extern void RestoreClientConnectionInfo(char *conninfo);
 
 /* in executor/nodeHash.c */
 extern size_t get_hash_memory_limit(void);
+extern size_t compute_hash_memory_limit(int workmem, double multiplier);
 
 #endif							/* MISCADMIN_H */

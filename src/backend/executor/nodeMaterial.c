@@ -62,7 +62,8 @@ ExecMaterial(PlanState *pstate)
 	 */
 	if (tuplestorestate == NULL && node->eflags != 0)
 	{
-		tuplestorestate = tuplestore_begin_heap(true, false, work_mem);
+		tuplestorestate = tuplestore_begin_heap(true, false,
+												ExecGetWorkMem(&node->ss.ps));
 		tuplestore_set_eflags(tuplestorestate, node->eflags);
 		if (node->eflags & EXEC_FLAG_MARK)
 		{

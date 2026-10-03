@@ -231,6 +231,8 @@ typedef struct Plan
 	 */
 	/* unique across entire final plan tree */
 	int			plan_node_id;
+	/* working memory (kB) for this node, or 0 to use work_mem */
+	int			workmem;
 	/* target list to be computed at this node */
 	List	   *targetlist;
 	/* implicitly-ANDed qual conditions */
