@@ -27,6 +27,7 @@ static void check_for_user_defined_postfix_ops(ClusterInfo *cluster);
 static void check_for_incompatible_polymorphics(ClusterInfo *cluster);
 static void check_for_tables_with_oids(ClusterInfo *cluster);
 static void check_for_not_null_inheritance(ClusterInfo *cluster);
+static void check_for_fk_collation_mismatch(ClusterInfo *cluster);
 static void check_for_gist_inet_ops(ClusterInfo *cluster);
 static void check_for_new_tablespace_dir(void);
 static void check_for_user_defined_encoding_conversions(ClusterInfo *cluster);
@@ -634,6 +635,19 @@ check_and_dump_old_cluster(void)
 	 */
 	if (GET_MAJOR_VERSION(old_cluster.major_version) <= 1800)
 		check_for_not_null_inheritance(&old_cluster);
+
+	/*
+	 * PG 18 rejects foreign keys where the referencing and referenced
+	 * columns have different collations and either of them is
+	 * nondeterministic, but older clusters allow creating them, so the
+	 * schema restore of the new cluster would fail.  Verify there are
+	 * none, iff the new cluster enforces the rule.  Versions before 12
+	 * have no nondeterministic collations, so they cannot contain the
+	 * problem.
+	 */
+	if (GET_MAJOR_VERSION(new_cluster.major_version) >= 1800 &&
+		GET_MAJOR_VERSION(old_cluster.major_version) >= 1200)
+		check_for_fk_collation_mismatch(&old_cluster);
 
 	/*
 	 * The btree_gist extension contains gist_inet_ops and gist_cidr_ops
@@ -1694,6 +1708,124 @@ check_for_not_null_inheritance(ClusterInfo *cluster)
 				 "You can fix this by running\n"
 				 "    ALTER TABLE tablename ALTER column SET NOT NULL;\n"
 				 "on each column listed in the file:\n"
+				 "    %s", report.path);
+	}
+	else
+		check_ok();
+}
+
+/*
+ * Callback function for processing results of query for
+ * check_for_fk_collation_mismatch()'s UpgradeTask.  If the query returned
+ * any rows (i.e., the check failed), write the details to the report file.
+ */
+static void
+process_fk_collation_mismatch(DbInfo *dbinfo, PGresult *res, void *arg)
+{
+	UpgradeTaskReport *report = (UpgradeTaskReport *) arg;
+	int			ntups = PQntuples(res);
+	int			i_fknspname = PQfnumber(res, "fknspname");
+	int			i_fkrelname = PQfnumber(res, "fkrelname");
+	int			i_conname = PQfnumber(res, "conname");
+	int			i_fkattname = PQfnumber(res, "fkattname");
+	int			i_fkcname = PQfnumber(res, "fkcname");
+	int			i_pknspname = PQfnumber(res, "pknspname");
+	int			i_pkrelname = PQfnumber(res, "pkrelname");
+	int			i_pkattname = PQfnumber(res, "pkattname");
+	int			i_pkcname = PQfnumber(res, "pkcname");
+
+	if (ntups == 0)
+		return;
+
+	if (report->file == NULL &&
+		(report->file = fopen_priv(report->path, "w")) == NULL)
+		pg_fatal("could not open file \"%s\": %m", report->path);
+
+	fprintf(report->file, "In database: %s\n", dbinfo->db_name);
+
+	for (int rowno = 0; rowno < ntups; rowno++)
+		fprintf(report->file,
+				"  constraint %s on column %s.%s.%s (collation \"%s\")\n"
+				"  references column %s.%s.%s (collation \"%s\")\n",
+				PQgetvalue(res, rowno, i_conname),
+				PQgetvalue(res, rowno, i_fknspname),
+				PQgetvalue(res, rowno, i_fkrelname),
+				PQgetvalue(res, rowno, i_fkattname),
+				PQgetvalue(res, rowno, i_fkcname),
+				PQgetvalue(res, rowno, i_pknspname),
+				PQgetvalue(res, rowno, i_pkrelname),
+				PQgetvalue(res, rowno, i_pkattname),
+				PQgetvalue(res, rowno, i_pkcname));
+}
+
+/*
+ * check_for_fk_collation_mismatch()
+ *
+ * PG 18 made it an error to declare a foreign key whose referencing and
+ * referenced columns have different collations with either of them being
+ * nondeterministic (prior versions allowed it).  Such a constraint cannot
+ * be created on the new cluster, so its schema restore would fail mid-way
+ * through the upgrade.  Check that the cluster to be upgraded doesn't
+ * contain any of those.
+ */
+static void
+check_for_fk_collation_mismatch(ClusterInfo *cluster)
+{
+	UpgradeTaskReport report;
+	UpgradeTask *task;
+	const char *query;
+
+	prep_status("Checking for foreign keys with incompatible collations");
+
+	report.file = NULL;
+	snprintf(report.path, sizeof(report.path), "%s/%s",
+			 log_opts.basedir,
+			 "fk_collation_mismatch.txt");
+
+	query = "SELECT fkn.nspname AS fknspname, fkc.relname AS fkrelname, "
+		"       con.conname, fka.attname AS fkattname, "
+		"       fkc2.collname AS fkcname, "
+		"       pkn.nspname AS pknspname, pkc.relname AS pkrelname, "
+		"       pka.attname AS pkattname, pkc2.collname AS pkcname "
+		"FROM pg_catalog.pg_constraint con, "
+		"     unnest(con.conkey, con.confkey) AS keys(fkattnum, pkattnum), "
+		"     pg_catalog.pg_attribute fka, pg_catalog.pg_collation fkc2, "
+		"     pg_catalog.pg_attribute pka, pg_catalog.pg_collation pkc2, "
+		"     pg_catalog.pg_class fkc, pg_catalog.pg_namespace fkn, "
+		"     pg_catalog.pg_class pkc, pg_catalog.pg_namespace pkn "
+		"WHERE con.contype = 'f' "
+		"      AND fka.attrelid = con.conrelid AND fka.attnum = keys.fkattnum "
+		"      AND pka.attrelid = con.confrelid AND pka.attnum = keys.pkattnum "
+		"      AND fkc2.oid = fka.attcollation "
+		"      AND pkc2.oid = pka.attcollation "
+		"      AND fka.attcollation <> pka.attcollation "
+		"      AND (NOT fkc2.collisdeterministic OR NOT pkc2.collisdeterministic) "
+		"      AND fkc.oid = con.conrelid AND fkn.oid = fkc.relnamespace "
+		"      AND pkc.oid = con.confrelid AND pkn.oid = pkc.relnamespace";
+
+	task = upgrade_task_create();
+	upgrade_task_add_step(task, query,
+						  process_fk_collation_mismatch,
+						  true, &report);
+	upgrade_task_run(task, cluster);
+	upgrade_task_free(task);
+
+	if (report.file)
+	{
+		fclose(report.file);
+		pg_log(PG_REPORT, "fatal");
+		pg_fatal("Your installation contains foreign key constraints with\n"
+				 "different collations on the referencing and referenced\n"
+				 "columns, at least one of them nondeterministic.  Such\n"
+				 "constraints are rejected by the new PostgreSQL version, so\n"
+				 "this cluster cannot currently be upgraded.  You can\n"
+				 "fix this by making the referencing and referenced columns\n"
+				 "use the same collation, e.g.:\n"
+				 "    ALTER TABLE fk_table ALTER COLUMN fk_col TYPE text\n"
+				 "        COLLATE collation;\n"
+				 "or by removing the constraint and recreating it after the\n"
+				 "upgrade.\n"
+				 "A list of the problem constraints is in the file:\n"
 				 "    %s", report.path);
 	}
 	else
