@@ -310,7 +310,7 @@ switchToPresortedPrefixMode(PlanState *pstate)
 												&(plannode->sort.sortOperators[nPresortedCols]),
 												&(plannode->sort.collations[nPresortedCols]),
 												&(plannode->sort.nullsFirst[nPresortedCols]),
-												work_mem,
+												ExecGetWorkMem(&node->ss.ps),
 												NULL,
 												node->bounded ? TUPLESORT_ALLOWBOUNDED : TUPLESORT_NONE);
 		node->prefixsort_state = prefixsort_state;
@@ -599,7 +599,7 @@ ExecIncrementalSort(PlanState *pstate)
 												  plannode->sort.sortOperators,
 												  plannode->sort.collations,
 												  plannode->sort.nullsFirst,
-												  work_mem,
+												  ExecGetWorkMem(&node->ss.ps),
 												  NULL,
 												  node->bounded ?
 												  TUPLESORT_ALLOWBOUNDED :

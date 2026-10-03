@@ -329,7 +329,8 @@ extern void ExecReScanAgg(AggState *node);
 extern Size hash_agg_entry_size(int numTrans, Size tupleWidth,
 								Size transitionSpace);
 extern void hash_agg_set_limits(double hashentrysize, double input_groups,
-								int used_bits, Size *mem_limit,
+								int used_bits, Size hash_mem_limit,
+								Size *mem_limit,
 								uint64 *ngroups_limit, int *num_partitions);
 
 /* parallel instrumentation support */

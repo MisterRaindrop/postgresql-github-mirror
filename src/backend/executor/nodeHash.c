@@ -501,6 +501,7 @@ ExecHashTableCreate(HashState *state)
 							state->parallel_state != NULL,
 							state->parallel_state != NULL ?
 							state->parallel_state->nparticipants - 1 : 0,
+							ExecGetHashMemoryLimit(&state->ps),
 							&space_allowed,
 							&nbuckets, &nbatch, &num_skew_mcvs);
 
@@ -540,6 +541,8 @@ ExecHashTableCreate(HashState *state)
 	hashtable->spaceUsed = 0;
 	hashtable->spacePeak = 0;
 	hashtable->spaceAllowed = space_allowed;
+	hashtable->workmem = ExecGetWorkMem(&state->ps);
+	hashtable->hash_mem_limit = ExecGetHashMemoryLimit(&state->ps);
 	hashtable->spaceUsedSkew = 0;
 	hashtable->spaceAllowedSkew =
 		hashtable->spaceAllowed * SKEW_HASH_MEM_PERCENT / 100;
@@ -683,6 +686,7 @@ void
 ExecChooseHashTableSize(double ntuples, int tupwidth, bool useskew,
 						bool try_combined_hash_mem,
 						int parallel_workers,
+						size_t hash_mem_limit,
 						size_t *space_allowed,
 						int *numbuckets,
 						int *numbatches,
@@ -712,9 +716,9 @@ ExecChooseHashTableSize(double ntuples, int tupwidth, bool useskew,
 	inner_rel_bytes = ntuples * tupsize;
 
 	/*
-	 * Compute in-memory hashtable size limit from GUCs.
+	 * In-memory hashtable size limit, as given by the caller.
 	 */
-	hash_table_bytes = get_hash_memory_limit();
+	hash_table_bytes = hash_mem_limit;
 
 	/*
 	 * Parallel Hash tries to use the combined hash_mem of all workers to
@@ -832,7 +836,7 @@ ExecChooseHashTableSize(double ntuples, int tupwidth, bool useskew,
 		if (try_combined_hash_mem)
 		{
 			ExecChooseHashTableSize(ntuples, tupwidth, useskew,
-									false, parallel_workers,
+									false, parallel_workers, hash_mem_limit,
 									space_allowed,
 									numbuckets,
 									numbatches,
@@ -1266,7 +1270,7 @@ ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable)
 					 * to switch from one large combined memory budget to the
 					 * regular hash_mem budget.
 					 */
-					pstate->space_allowed = get_hash_memory_limit();
+					pstate->space_allowed = hashtable->hash_mem_limit;
 
 					/*
 					 * The combined hash_mem of all participants wasn't
@@ -2807,7 +2811,7 @@ ExecHashBuildNullTupleStore(HashJoinTable hashtable)
 	 * consumption too much.
 	 */
 	oldcxt = MemoryContextSwitchTo(hashtable->hashCxt);
-	tstore = tuplestore_begin_heap(false, false, work_mem / 16);
+	tstore = tuplestore_begin_heap(false, false, hashtable->workmem / 16);
 	MemoryContextSwitchTo(oldcxt);
 	return tstore;
 }
@@ -3679,10 +3683,20 @@ ExecParallelHashTuplePrealloc(HashJoinTable hashtable, int batchno, size_t size)
 size_t
 get_hash_memory_limit(void)
 {
+	return compute_hash_memory_limit(work_mem, hash_mem_multiplier);
+}
+
+/*
+ * Like get_hash_memory_limit(), for the given work_mem (in kB) and
+ * multiplier rather than the current settings.
+ */
+size_t
+compute_hash_memory_limit(int workmem, double multiplier)
+{
 	double		mem_limit;
 
 	/* Do initial calculation in double arithmetic */
-	mem_limit = (double) work_mem * hash_mem_multiplier * 1024.0;
+	mem_limit = (double) workmem * multiplier * 1024.0;
 
 	/* Clamp in case it doesn't fit in size_t */
 	mem_limit = Min(mem_limit, (double) SIZE_MAX);

@@ -652,6 +652,10 @@ extern EState *CreateExecutorState(void);
 extern void FreeExecutorState(EState *estate);
 extern ExprContext *CreateExprContext(EState *estate);
 extern ExprContext *CreateWorkExprContext(EState *estate);
+extern ExprContext *CreateWorkExprContextExtended(EState *estate, int workmem);
+extern int	ExecGetWorkMem(PlanState *ps);
+extern size_t ExecGetHashMemoryLimit(PlanState *ps);
+
 extern ExprContext *CreateStandaloneExprContext(void);
 extern void FreeExprContext(ExprContext *econtext, bool isCommit);
 extern void ReScanExprContext(ExprContext *econtext);

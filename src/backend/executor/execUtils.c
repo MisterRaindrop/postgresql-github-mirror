@@ -315,6 +315,30 @@ CreateExprContext(EState *estate)
 }
 
 
+/*
+ * ExecGetWorkMem
+ *
+ * Working memory, in kB, for the given plan node: the node's own limit if
+ * one was set (for example by a planner hook), else work_mem.
+ */
+int
+ExecGetWorkMem(PlanState *ps)
+{
+	return ps->plan->workmem > 0 ? ps->plan->workmem : work_mem;
+}
+
+/*
+ * ExecGetHashMemoryLimit
+ *
+ * Memory limit, in bytes, for a hash table belonging to the given plan
+ * node: the node's working memory times hash_mem_multiplier.
+ */
+size_t
+ExecGetHashMemoryLimit(PlanState *ps)
+{
+	return compute_hash_memory_limit(ExecGetWorkMem(ps), hash_mem_multiplier);
+}
+
 /* ----------------
  *		CreateWorkExprContext
  *
@@ -326,9 +350,21 @@ CreateExprContext(EState *estate)
 ExprContext *
 CreateWorkExprContext(EState *estate)
 {
+	return CreateWorkExprContextExtended(estate, work_mem);
+}
+
+/*
+ * CreateWorkExprContextExtended
+ *
+ * Like CreateWorkExprContext(), for a node whose working memory, in kB, is
+ * given rather than taken from work_mem.
+ */
+ExprContext *
+CreateWorkExprContextExtended(EState *estate, int workmem)
+{
 	Size		maxBlockSize;
 
-	maxBlockSize = pg_prevpower2_size_t(work_mem * (Size) 1024 / 16);
+	maxBlockSize = pg_prevpower2_size_t(workmem * (Size) 1024 / 16);
 
 	/* But no bigger than ALLOCSET_DEFAULT_MAXSIZE */
 	maxBlockSize = Min(maxBlockSize, ALLOCSET_DEFAULT_MAXSIZE);
@@ -490,6 +526,7 @@ void
 ExecAssignExprContext(EState *estate, PlanState *planstate)
 {
 	planstate->ps_ExprContext = CreateExprContext(estate);
+	planstate->ps_ExprContext->ecxt_workmem = planstate->plan->workmem;
 }
 
 /* ----------------

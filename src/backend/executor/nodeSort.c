@@ -98,7 +98,7 @@ ExecSort(PlanState *pstate)
 												   plannode->sortOperators[0],
 												   plannode->collations[0],
 												   plannode->nullsFirst[0],
-												   work_mem,
+												   ExecGetWorkMem(&node->ss.ps),
 												   NULL,
 												   tuplesortopts);
 		else
@@ -108,7 +108,7 @@ ExecSort(PlanState *pstate)
 												  plannode->sortOperators,
 												  plannode->collations,
 												  plannode->nullsFirst,
-												  work_mem,
+												  ExecGetWorkMem(&node->ss.ps),
 												  NULL,
 												  tuplesortopts);
 		if (node->bounded)
