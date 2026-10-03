@@ -78,6 +78,15 @@ extern void ParallelSlotsTerminate(ParallelSlotArray *sa);
 
 extern bool ParallelSlotsWaitCompletion(ParallelSlotArray *sa);
 
+/*
+ * Wait for the results of the query currently being processed by the given
+ * slot, and process them with the handler set for this slot.  Returns
+ * false if the query failed, true otherwise.  The slot is not marked as
+ * idle by this function.  Note that this will block if the connection is
+ * busy.
+ */
+extern bool consumeQueryResult(ParallelSlot *slot);
+
 extern bool TableCommandResultHandler(PGresult *res, PGconn *conn,
 									  void *context);
 

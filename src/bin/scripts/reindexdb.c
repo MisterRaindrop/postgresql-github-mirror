@@ -434,7 +434,7 @@ reindex_one_database(ConnParams *cparams, ReindexType type,
 
 		ParallelSlotSetHandler(free_slot, TableCommandResultHandler, NULL);
 		initPQExpBuffer(&sql);
-		if (parallel && process_type == REINDEX_INDEX)
+		if (parallel && process_type == REINDEX_INDEX && !concurrently)
 		{
 			/*
 			 * For parallel index-level REINDEX, the indices of the same table
@@ -455,14 +455,51 @@ reindex_one_database(ConnParams *cparams, ReindexType type,
 									echo, verbose, concurrently, tablespace, &sql);
 			}
 			indices_tables_cell = indices_tables_cell->next;
+			run_reindex_command(free_slot->connection, process_type, objname,
+								echo, &sql);
+		}
+		else if (parallel && process_type == REINDEX_INDEX)
+		{
+			/*
+			 * REINDEX CONCURRENTLY cannot run in a transaction block, so it
+			 * cannot be part of a multi-statement simple query, which would
+			 * be an implicit transaction block.  The indices of the same
+			 * table still have to be processed by the same job, to avoid
+			 * concurrent REINDEX CONCURRENTLY commands on the same table,
+			 * which could deadlock.  So, each command is sent separately,
+			 * waiting for it to complete before sending the next one.
+			 */
+			gen_reindex_command(free_slot->connection, process_type, objname,
+								echo, verbose, concurrently, tablespace, &sql);
+			run_reindex_command(free_slot->connection, process_type, objname,
+								echo, &sql);
+			if (!consumeQueryResult(free_slot))
+				failed = true;
+			while (indices_tables_cell->next &&
+				   indices_tables_cell->val == indices_tables_cell->next->val)
+			{
+				indices_tables_cell = indices_tables_cell->next;
+				cell = cell->next;
+				objname = cell->val;
+				termPQExpBuffer(&sql);
+				initPQExpBuffer(&sql);
+				gen_reindex_command(free_slot->connection, process_type, objname,
+									echo, verbose, concurrently, tablespace, &sql);
+				run_reindex_command(free_slot->connection, process_type, objname,
+									echo, &sql);
+				if (!consumeQueryResult(free_slot))
+					failed = true;
+			}
+			indices_tables_cell = indices_tables_cell->next;
+			ParallelSlotSetIdle(free_slot);
 		}
 		else
 		{
 			gen_reindex_command(free_slot->connection, process_type, objname,
 								echo, verbose, concurrently, tablespace, &sql);
+			run_reindex_command(free_slot->connection, process_type, objname,
+								echo, &sql);
 		}
-		run_reindex_command(free_slot->connection, process_type, objname,
-							echo, &sql);
 		termPQExpBuffer(&sql);
 
 		cell = cell->next;

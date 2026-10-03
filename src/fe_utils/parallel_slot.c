@@ -54,7 +54,7 @@ processQueryResult(ParallelSlot *slot, PGresult *result)
  * nothing remains.  If at least one error is encountered, return false.
  * Note that this will block if the connection is busy.
  */
-static bool
+bool
 consumeQueryResult(ParallelSlot *slot)
 {
 	bool		ok = true;

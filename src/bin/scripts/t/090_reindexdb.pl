@@ -168,6 +168,30 @@ $node->issues_sql_like(
 	[ 'reindexdb', '--concurrently', '--index' => 'test1x', 'postgres' ],
 	qr/statement: REINDEX INDEX CONCURRENTLY public\.test1x;/,
 	'reindex specific index concurrently');
+
+# Multiple indexes of the same table with parallel jobs must not be
+# batched into a single multi-statement query when using --concurrently,
+# as REINDEX CONCURRENTLY cannot run inside a transaction block.
+$node->safe_psql('postgres',
+	'CREATE TABLE test2 (a int); CREATE INDEX test2x ON test2 (a);'
+	  . ' CREATE INDEX test2y ON test2 (a);');
+$node->command_ok(
+	[
+		'reindexdb', '--jobs' => '2', '--concurrently',
+		'--index' => 'test2x',
+		'--index' => 'test2y',
+		'postgres',
+	],
+	'reindex two indexes of the same table concurrently with two jobs');
+$node->command_ok(
+	[
+		'reindexdb', '--jobs' => '2',
+		'--index' => 'test2x',
+		'--index' => 'test2y',
+		'postgres',
+	],
+	'reindex two indexes of the same table with two jobs');
+
 $node->issues_sql_like(
 	[ 'reindexdb', '--concurrently', '--schema' => 'public', 'postgres' ],
 	qr/statement: REINDEX SCHEMA CONCURRENTLY public;/,
