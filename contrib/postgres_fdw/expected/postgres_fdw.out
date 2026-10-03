@@ -5354,6 +5354,8 @@ ALTER FOREIGN TABLE ft1 ALTER COLUMN c8 TYPE user_enum;
 -- ===================================================================
 -- subtransaction
 --  + local/remote error doesn't break cursor
+--  + cursors opened before a savepoint are disallowed to be first
+--    fetched within it
 -- ===================================================================
 BEGIN;
 DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
@@ -5393,6 +5395,53 @@ SELECT * FROM ft1 ORDER BY c1 LIMIT 1;
 (1 row)
 
 COMMIT;
+-- first fetch within a savepoint is fine if remote savepoint level is
+-- not advanced beyond the one the cursor was created in
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+SAVEPOINT s;
+FETCH c;
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  1 |  1 | 00001 | Fri Jan 02 00:00:00 1970 PST | Fri Jan 02 00:00:00 1970 | 1  | 1          | foo
+(1 row)
+
+ROLLBACK TO s;
+FETCH c;
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  2 |  2 | 00002 | Sat Jan 03 00:00:00 1970 PST | Sat Jan 03 00:00:00 1970 | 2  | 2          | foo
+(1 row)
+
+COMMIT;
+-- ... but not otherwise
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+SAVEPOINT s;
+SELECT count(*) FROM ft1;
+ count 
+-------
+  1000
+(1 row)
+
+FETCH c;
+ERROR:  cannot perform the first fetch of a cursor within a deeper subtransaction than it was created in
+ABORT;
+-- a cursor created in a released savepoint is handed to its parent
+BEGIN;
+SAVEPOINT s1;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+RELEASE s1;
+SAVEPOINT s2;
+SELECT count(*) FROM ft1;
+ count 
+-------
+  1000
+(1 row)
+
+FETCH c;
+ERROR:  cannot perform the first fetch of a cursor within a deeper subtransaction than it was created in
+ABORT;
 -- ===================================================================
 -- test handling of collations
 -- ===================================================================
