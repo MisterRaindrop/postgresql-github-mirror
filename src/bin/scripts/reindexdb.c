@@ -458,7 +458,9 @@ reindex_one_database(ConnParams *cparams, ReindexType type,
 			run_reindex_command(free_slot->connection, process_type, objname,
 								echo, &sql);
 		}
-		else if (parallel && process_type == REINDEX_INDEX)
+		else if (parallel && process_type == REINDEX_INDEX &&
+				 indices_tables_cell->next &&
+				 indices_tables_cell->val == indices_tables_cell->next->val)
 		{
 			/*
 			 * REINDEX CONCURRENTLY cannot run in a transaction block, so it
@@ -469,32 +471,37 @@ reindex_one_database(ConnParams *cparams, ReindexType type,
 			 * which could deadlock.  So, each command is sent separately,
 			 * waiting for it to complete before sending the next one.
 			 */
-			gen_reindex_command(free_slot->connection, process_type, objname,
-								echo, verbose, concurrently, tablespace, &sql);
-			run_reindex_command(free_slot->connection, process_type, objname,
-								echo, &sql);
-			if (!consumeQueryResult(free_slot))
-				failed = true;
-			while (indices_tables_cell->next &&
-				   indices_tables_cell->val == indices_tables_cell->next->val)
+			for (;;)
 			{
-				indices_tables_cell = indices_tables_cell->next;
-				cell = cell->next;
-				objname = cell->val;
-				termPQExpBuffer(&sql);
-				initPQExpBuffer(&sql);
 				gen_reindex_command(free_slot->connection, process_type, objname,
 									echo, verbose, concurrently, tablespace, &sql);
 				run_reindex_command(free_slot->connection, process_type, objname,
 									echo, &sql);
-				if (!consumeQueryResult(free_slot))
+
+				/* Stop at the first failure or cancel, as the other paths do. */
+				if (!consumeQueryResult(free_slot) || CancelRequested)
+				{
+					termPQExpBuffer(&sql);
 					failed = true;
+					goto finish;
+				}
+
+				if (!(indices_tables_cell->next &&
+					  indices_tables_cell->val == indices_tables_cell->next->val))
+					break;
+				indices_tables_cell = indices_tables_cell->next;
+				cell = cell->next;
+				objname = cell->val;
+				resetPQExpBuffer(&sql);
 			}
 			indices_tables_cell = indices_tables_cell->next;
 			ParallelSlotSetIdle(free_slot);
 		}
 		else
 		{
+			/* The only index of its table: nothing to keep in order. */
+			if (parallel && process_type == REINDEX_INDEX)
+				indices_tables_cell = indices_tables_cell->next;
 			gen_reindex_command(free_slot->connection, process_type, objname,
 								echo, verbose, concurrently, tablespace, &sql);
 			run_reindex_command(free_slot->connection, process_type, objname,
