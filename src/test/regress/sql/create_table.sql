@@ -729,6 +729,17 @@ insert into defcheck_def values (0, 0);
 create table defcheck_0 partition of defcheck for values in (0);
 drop table defcheck;
 
+-- A child of the default partition may have a different column order.
+-- Its CHECK constraint must not skip validation of rows in the new bound.
+create table defmap (a int, b int) partition by list (a);
+create table defmap_def partition of defmap default partition by range (b);
+create table defmap_child (b int check (b > 0), a int);
+alter table defmap_def attach partition defmap_child for values from (1) to (100);
+insert into defmap values (0, 2);
+create table defmap_0 partition of defmap for values in (0); -- error
+select tableoid::regclass, a, b from defmap where a = 0;
+drop table defmap;
+
 -- tests of column drop with partition tables and indexes using
 -- predicates and expressions.
 create table part_column_drop (
