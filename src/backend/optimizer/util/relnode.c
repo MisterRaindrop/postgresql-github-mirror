@@ -2041,6 +2041,122 @@ get_joinrel_parampathinfo(PlannerInfo *root, RelOptInfo *joinrel,
 }
 
 /*
+ * get_joinrel_parampathinfo_pushdown
+ *		Get/build the ParamPathInfo for a parameterized join path that an FDW
+ *		or custom scan provider computes as a whole (for example, a foreign
+ *		join pushed down to a remote server).
+ *
+ * Unlike get_joinrel_parampathinfo(), the caller does not have a pair of
+ * input paths describing how the join is formed.  Instead it supplies the
+ * parameterization (required_outer), the estimated rowcount, and the list of
+ * RestrictInfos that the path enforces internally (restrict_clauses).  That
+ * list normally consists of the join's own restriction clauses plus any join
+ * clauses that were moved into this path because of the parameterization.
+ *
+ * The restrict_clauses list is the full set of clauses the path enforces:
+ * the join's own restriction clauses plus any join clauses moved into the
+ * path because of the parameterization.  From it we pick out the "moved"
+ * clauses -- those referencing required_outer -- and record them in both:
+ *
+ *   ppi_clauses: so that create_foreignscan_plan() forwards them to the FDW's
+ *     GetForeignPlan callback as scan_clauses (like it does for base rels),
+ *     letting the FDW enforce them remotely as parameters.  Note this differs
+ *     from get_joinrel_parampathinfo(), which leaves ppi_clauses NIL because a
+ *     locally-formed join's relevant clauses vary with the input-path pair; a
+ *     pushed-down join computes the whole thing at once, so the set is fixed.
+ *
+ *   ppi_serials: so that get_param_path_clause_serials() reports them for such
+ *     a path (which falls through to the ppi_serials shortcut, being neither a
+ *     join Path nor an Append/base Path), letting the planner avoid
+ *     re-checking those clauses at a parent join.
+ *
+ * The join's own clauses are not put in ppi_clauses/ppi_serials: they are
+ * fully contained in the joinrel and can't be re-applied at a parent join,
+ * and the FDW enforces them from its own saved state, not via scan_clauses.
+ *
+ * As with the other get_*_parampathinfo functions, we cache one ParamPathInfo
+ * per parameterization on the rel.  If one already exists (for instance one
+ * built by get_joinrel_parampathinfo() for a competing local join path, which
+ * leaves ppi_clauses/ppi_serials empty), we reuse it to keep the rowcount
+ * estimate consistent, but make sure its ppi_clauses/ppi_serials cover the
+ * clauses this path enforces.
+ */
+ParamPathInfo *
+get_joinrel_parampathinfo_pushdown(RelOptInfo *joinrel,
+								   Relids required_outer,
+								   List *restrict_clauses,
+								   double rows)
+{
+	ParamPathInfo *ppi;
+	Relids		join_and_req;
+	List	   *pclauses;
+	Bitmapset  *pserials;
+	ListCell   *lc;
+
+	/* If rel has LATERAL refs, every path for it should account for them */
+	Assert(bms_is_subset(joinrel->lateral_relids, required_outer));
+
+	/* Unparameterized paths have no ParamPathInfo */
+	if (bms_is_empty(required_outer))
+		return NULL;
+
+	Assert(!bms_overlap(joinrel->relids, required_outer));
+	join_and_req = bms_union(joinrel->relids, required_outer);
+
+	/*
+	 * Pick out the moved-in clauses (those referencing the outer rels) and
+	 * compute their serial numbers.  The join's own clauses reference only
+	 * rels within the joinrel, so they don't overlap required_outer.
+	 */
+	pclauses = NIL;
+	pserials = NULL;
+	foreach(lc, restrict_clauses)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+
+		if (!bms_overlap(rinfo->clause_relids, required_outer))
+			continue;
+		if ((rinfo->has_clone || rinfo->is_clone) &&
+			bms_overlap(rinfo->incompatible_relids, join_and_req))
+			continue;
+		if (bms_is_member(rinfo->rinfo_serial, pserials))
+			continue;
+		pclauses = lappend(pclauses, rinfo);
+		pserials = bms_add_member(pserials, rinfo->rinfo_serial);
+	}
+
+	/* We should not have accepted multiple clones of the same clause */
+	Assert(no_duplicate_clause_serials(pclauses));
+
+	/*
+	 * Reuse an existing PPI for this parameterization if we have one, so that
+	 * the rowcount estimate stays consistent across all paths, but make sure
+	 * its ppi_clauses/ppi_serials cover the clauses this path enforces.
+	 */
+	if ((ppi = find_param_path_info(joinrel, required_outer)))
+	{
+		if (ppi->ppi_clauses == NIL)
+		{
+			ppi->ppi_clauses = pclauses;
+			ppi->ppi_serials = bms_add_members(ppi->ppi_serials, pserials);
+		}
+		else
+			Assert(bms_equal(ppi->ppi_serials, pserials));
+		return ppi;
+	}
+
+	/* Else build a new ParamPathInfo */
+	ppi = makeNode(ParamPathInfo);
+	ppi->ppi_req_outer = required_outer;
+	ppi->ppi_rows = rows;
+	ppi->ppi_clauses = pclauses;
+	ppi->ppi_serials = pserials;
+	joinrel->ppilist = lappend(joinrel->ppilist, ppi);
+
+	return ppi;
+}
+
+/*
  * get_appendrel_parampathinfo
  *		Get the ParamPathInfo for a parameterized path for an append relation.
  *

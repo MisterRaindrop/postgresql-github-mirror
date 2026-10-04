@@ -2173,6 +2173,11 @@ create_foreignscan_path(PlannerInfo *root, RelOptInfo *rel,
  * We make the FDW supply all fields of the path, since we do not have any way
  * to calculate them in core.  However, there is a usually-sane default for
  * the pathtarget (rel->reltarget), so we let a NULL for "target" select that.
+ *
+ * The path may be parameterized: pass the required outer rels in
+ * required_outer and the RestrictInfos the path enforces (the join's own
+ * clauses plus any moved into the path by the parameterization) in
+ * fdw_restrictinfo.  We build the ParamPathInfo from those.
  */
 ForeignPath *
 create_foreign_join_path(PlannerInfo *root, RelOptInfo *rel,
@@ -2188,19 +2193,21 @@ create_foreign_join_path(PlannerInfo *root, RelOptInfo *rel,
 	ForeignPath *pathnode = makeNode(ForeignPath);
 
 	/*
-	 * We should use get_joinrel_parampathinfo to handle parameterized paths,
-	 * but the API of this function doesn't support it, and existing
-	 * extensions aren't yet trying to build such paths anyway.  For the
-	 * moment just throw an error if someone tries it; eventually we should
-	 * revisit this.
+	 * Build a ParamPathInfo if this is a parameterized path, i.e. one that
+	 * has required outer rels (for instance a foreign join with LATERAL
+	 * references, or one that enforces join clauses referencing outer
+	 * relations).  The FDW tells us which clauses the path enforces via
+	 * fdw_restrictinfo; we record their serial numbers in the ParamPathInfo
+	 * so that get_param_path_clause_serials() reports them correctly and the
+	 * planner doesn't re-check them at a parent join.  For an unparameterized
+	 * path this returns NULL, as before.
 	 */
-	if (!bms_is_empty(required_outer) || !bms_is_empty(rel->lateral_relids))
-		elog(ERROR, "parameterized foreign joins are not supported yet");
-
 	pathnode->path.pathtype = T_ForeignScan;
 	pathnode->path.parent = rel;
 	pathnode->path.pathtarget = target ? target : rel->reltarget;
-	pathnode->path.param_info = NULL;	/* XXX see above */
+	pathnode->path.param_info =
+		get_joinrel_parampathinfo_pushdown(rel, required_outer,
+										   fdw_restrictinfo, rows);
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel;
 	pathnode->path.parallel_workers = 0;
