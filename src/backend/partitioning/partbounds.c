@@ -3297,16 +3297,18 @@ check_default_partition_contents(Relation parent, Relation default_rel,
 		/* Lock already taken above. */
 		if (part_relid != RelationGetRelid(default_rel))
 		{
+			List	   *part_constraints;
+
 			part_rel = table_open(part_relid, NoLock);
 
 			/*
 			 * Map the Vars in the constraint expression from default_rel's
-			 * the sub-partition's.
+			 * attribute numbers to the sub-partition's.
 			 */
-			partition_constraint = make_ands_explicit(def_part_constraints);
-			partition_constraint = (Expr *)
-				map_partition_varattnos((List *) partition_constraint, 1,
+			part_constraints =
+				map_partition_varattnos(def_part_constraints, 1,
 										part_rel, default_rel);
+			partition_constraint = make_ands_explicit(part_constraints);
 
 			/*
 			 * If the partition constraints on default partition child imply
@@ -3314,7 +3316,7 @@ check_default_partition_contents(Relation parent, Relation default_rel,
 			 * partition, we can avoid scanning the child table.
 			 */
 			if (PartConstraintImpliedByRelConstraint(part_rel,
-													 def_part_constraints))
+													 part_constraints))
 			{
 				ereport(DEBUG1,
 						(errmsg_internal("updated partition constraint for default partition \"%s\" is implied by existing constraints",
