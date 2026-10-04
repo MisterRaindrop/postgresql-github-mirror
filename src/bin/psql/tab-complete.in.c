@@ -2954,6 +2954,11 @@ match_previous_words(int pattern_id,
 		set_completion_reference(prev3_wd);
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_constraint_of_table);
 	}
+	/* ALTER TABLE <sth> ALTER CONSTRAINT <constraint> options */
+	else if (Matches("ALTER", "TABLE", MatchAny, "ALTER", "CONSTRAINT", MatchAny))
+		COMPLETE_WITH("DEFERRABLE", "NOT DEFERRABLE", "ENFORCED", "NOT ENFORCED",
+					  "INITIALLY DEFERRED", "INITIALLY IMMEDIATE",
+					  "INHERIT", "NO INHERIT");
 	/* ALTER TABLE <sth> VALIDATE CONSTRAINT <non-validated constraint> */
 	else if (Matches("ALTER", "TABLE", MatchAny, "VALIDATE", "CONSTRAINT"))
 	{
