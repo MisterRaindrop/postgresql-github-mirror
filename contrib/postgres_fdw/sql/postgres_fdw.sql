@@ -743,6 +743,54 @@ SELECT t1c1, avg(t1c1 + t2c1) FROM (SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft2 t2 
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT t1."C 1" FROM "S 1"."T 1" t1, LATERAL (SELECT DISTINCT t2.c1, t3.c1 FROM ft1 t2, ft2 t3 WHERE t2.c1 = t3.c1 AND t2.c2 = t1.c2) q ORDER BY t1."C 1" OFFSET 10 LIMIT 10;
 SELECT t1."C 1" FROM "S 1"."T 1" t1, LATERAL (SELECT DISTINCT t2.c1, t3.c1 FROM ft1 t2, ft2 t3 WHERE t2.c1 = t3.c1 AND t2.c2 = t1.c2) q ORDER BY t1."C 1" OFFSET 10 LIMIT 10;
+
+-- Parameterized foreign join: a join between two foreign tables that carries a
+-- lateral reference to an outer (local) relation is implemented as a
+-- parameterized ForeignPath, with the outer values sent to the remote server
+-- as query parameters.  The RIGHT JOIN keeps the lateral reference from being
+-- flattened into an ordinary join clause, so the inner foreign join really is
+-- parameterized.  (Derived from a case in src/test/regress/sql/join.sql.)
+CREATE TABLE loc_pfj (f1 int);
+INSERT INTO loc_pfj VALUES (1), (3), (5);
+CREATE TABLE base_pfj8 (q1 bigint, q2 bigint);
+INSERT INTO base_pfj8 VALUES (1, 1);
+CREATE TABLE base_pfj4 (f1 int);
+INSERT INTO base_pfj4 VALUES (1), (3), (5);
+CREATE FOREIGN TABLE ft_pfj8 (q1 bigint, q2 bigint)
+  SERVER loopback OPTIONS (table_name 'base_pfj8', use_remote_estimate 'true');
+CREATE FOREIGN TABLE ft_pfj4 (f1 int)
+  SERVER loopback OPTIONS (table_name 'base_pfj4', use_remote_estimate 'true');
+ANALYZE base_pfj8;
+ANALYZE base_pfj4;
+-- The inner foreign join (ft_pfj8 x ft_pfj4) is parameterized by loc_pfj;
+-- note the parameter placeholder ($1) in the remote SQL.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT o.f1, ss.x FROM loc_pfj o,
+  LATERAL (SELECT 1 AS x
+           FROM (SELECT o.f1 AS lat, i2.f1 AS locv FROM ft_pfj8 i1, ft_pfj4 i2) ss1
+           RIGHT JOIN ft_pfj4 i3 ON (i3.f1 > 1)
+           WHERE ss1.locv = ss1.lat) ss
+  ORDER BY o.f1;
+SELECT o.f1, ss.x FROM loc_pfj o,
+  LATERAL (SELECT 1 AS x
+           FROM (SELECT o.f1 AS lat, i2.f1 AS locv FROM ft_pfj8 i1, ft_pfj4 i2) ss1
+           RIGHT JOIN ft_pfj4 i3 ON (i3.f1 > 1)
+           WHERE ss1.locv = ss1.lat) ss
+  ORDER BY o.f1;
+-- The same query over the underlying local tables, as a correctness oracle:
+-- it must return exactly the same rows as the pushed-down foreign join above.
+SELECT o.f1, ss.x FROM loc_pfj o,
+  LATERAL (SELECT 1 AS x
+           FROM (SELECT o.f1 AS lat, i2.f1 AS locv FROM base_pfj8 i1, base_pfj4 i2) ss1
+           RIGHT JOIN base_pfj4 i3 ON (i3.f1 > 1)
+           WHERE ss1.locv = ss1.lat) ss
+  ORDER BY o.f1;
+DROP FOREIGN TABLE ft_pfj8;
+DROP FOREIGN TABLE ft_pfj4;
+DROP TABLE base_pfj8;
+DROP TABLE base_pfj4;
+DROP TABLE loc_pfj;
+
 -- join with pseudoconstant quals
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1 AND CURRENT_USER = SESSION_USER) ORDER BY t1.c3, t1.c1 OFFSET 100 LIMIT 10;

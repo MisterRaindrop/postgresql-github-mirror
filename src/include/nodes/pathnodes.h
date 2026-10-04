@@ -1904,16 +1904,18 @@ typedef struct PathTarget
  * avoid recalculations, but mostly to ensure that the estimated rowcount
  * is in fact the same for every such path.
  *
- * Note: ppi_clauses is only used in ParamPathInfos for base relation paths;
- * in join cases it's NIL because the set of relevant clauses varies depending
- * on how the join is formed.  The relevant clauses will appear in each
- * parameterized join path's joinrestrictinfo list, instead.  ParamPathInfos
- * for append relations don't bother with this, either.
+ * Note: ppi_clauses is normally only used in ParamPathInfos for base relation
+ * paths.  For ordinary join paths it's NIL because the set of relevant clauses
+ * varies depending on how the join is formed; those clauses appear in each
+ * parameterized join path's joinrestrictinfo list instead.  However, scan-type
+ * paths that compute a whole join externally may use ppi_clauses for clauses
+ * supplied by outer relations.  ParamPathInfos for append relations don't
+ * bother with this, either.
  *
  * ppi_serials is the set of rinfo_serial numbers for quals that are enforced
- * by this path.  As with ppi_clauses, it's only maintained for baserels.
- * (We could construct it on-the-fly from ppi_clauses, but it seems better
- * to materialize a copy.)
+ * by this path.  As with ppi_clauses, it's maintained for baserels and for
+ * scan-type paths that compute a whole join externally.  (We could construct
+ * it on-the-fly from ppi_clauses, but it seems better to materialize a copy.)
  */
 typedef struct ParamPathInfo
 {
