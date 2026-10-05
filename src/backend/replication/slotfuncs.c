@@ -327,8 +327,15 @@ pg_get_replication_slots(PG_FUNCTION_ARGS)
 		else
 			nulls[i++] = true;
 
+		/*
+		 * A logical slot being created with an exported or used snapshot
+		 * holds back the data xmin through its in-memory effective xmin
+		 * alone. See CreateInitDecodingContext().
+		 */
 		if (slot_contents.data.xmin != InvalidTransactionId)
 			values[i++] = TransactionIdGetDatum(slot_contents.data.xmin);
+		else if (slot_contents.effective_xmin != InvalidTransactionId)
+			values[i++] = TransactionIdGetDatum(slot_contents.effective_xmin);
 		else
 			nulls[i++] = true;
 
