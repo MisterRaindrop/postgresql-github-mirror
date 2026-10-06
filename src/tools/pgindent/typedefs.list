@@ -1749,6 +1749,7 @@ MVNDistinctItem
 ManyTestResource
 ManyTestResourceKind
 Material
+MaterialInstrumentation
 MaterialPath
 MaterialState
 MdPathStr
@@ -2889,6 +2890,7 @@ SharedInvalSmgrMsg
 SharedInvalSnapshotMsg
 SharedInvalidationMessage
 SharedJitInstrumentation
+SharedMaterialInfo
 SharedMemoizeInfo
 SharedRecordTableEntry
 SharedRecordTableKey
