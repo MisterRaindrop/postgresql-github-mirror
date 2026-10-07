@@ -2033,6 +2033,12 @@ typedef struct Path
  * in the same order.  These are not RestrictInfos, just bare expressions,
  * since they generally won't yield booleans.  It's guaranteed that each
  * expression has the index key on the left side of the operator.
+ * Typically these are distance operators, as in "ORDER BY col <-> constant".
+ * Ordinary column ordering from an amcanorder index (btree) is not
+ * represented here; such a path has indexorderbys = NIL, and its ordering
+ * is shown only by its pathkeys.  An amcanorderbyop index may compute the
+ * ORDER BY values only approximately, in which case the executor rechecks
+ * and reorders its output; see IndexNextWithReorder.
  *
  * 'indexorderbycols' is an integer list of index column numbers (zero-based)
  * of the same length as 'indexorderbys', showing which index column each

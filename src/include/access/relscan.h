@@ -193,6 +193,19 @@ typedef struct IndexScanDescData
 	 * xs_recheckorderby is true, these need to be rechecked just like the
 	 * scan keys, and the values returned here are a lower-bound on the actual
 	 * values.
+	 *
+	 * "Ordering operator" here means an amcanorderbyop operator such as a
+	 * distance ("ORDER BY col <-> constant"); these fields are not used for
+	 * amcanorder scans.  The AM must return tuples in nondecreasing order of
+	 * the values it reports here, and when xs_recheckorderby is set, each
+	 * reported value must be <= the value the ORDER BY expression yields for
+	 * the heap tuple.  The executor recomputes that value and reorders tuples
+	 * as needed (see IndexNextWithReorder), and raises an error if a
+	 * recomputed value is smaller than the reported one.  Values reported
+	 * with xs_recheckorderby false are used as is; if the scan may also
+	 * return tuples with it set, they must equal the ORDER BY expression's
+	 * value.  The AM sets xs_recheckorderby separately for each tuple it
+	 * returns.
 	 */
 	Datum	   *xs_orderbyvals;
 	bool	   *xs_orderbynulls;
