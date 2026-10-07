@@ -723,6 +723,38 @@ amgettuple (IndexScanDesc scan,
   </para>
 
   <para>
+   If the scan has ordering operators (see
+   <structfield>amcanorderbyop</structfield> in
+   <xref linkend="index-scanning"/>), then on success
+   <function>amgettuple</function> must also set
+   <literal>scan-&gt;xs_recheckorderby</literal> to true or false, and store
+   the value of each <literal>ORDER BY</literal> expression for the returned
+   tuple, as computed by the index, in
+   <literal>scan-&gt;xs_orderbyvals</literal> and
+   <literal>scan-&gt;xs_orderbynulls</literal>.  (The access method must
+   allocate these arrays, with <literal>norderbys</literal> entries; this is
+   typically done in <function>ambeginscan</function>.)  Tuples must be
+   returned in nondecreasing order of these values, with nulls sorting after
+   all non-null values.  If <literal>xs_recheckorderby</literal> is set to
+   true, the values are only lower bounds: each must be less than or equal to
+   the value the ordering operator yields for the heap tuple.  The executor
+   then computes the exact values from the heap tuple and reorders tuples as
+   needed; it reports an error if a computed value is less than the value the
+   index returned for that tuple.  If <literal>xs_recheckorderby</literal> is
+   false, the executor takes the values to be exact.  In a scan that may
+   return tuples with <literal>xs_recheckorderby</literal> true, the index's
+   values are compared with values the executor computes, so they must be of
+   the ordering operator's result type, and those returned with
+   <literal>xs_recheckorderby</literal> false must equal the ordering
+   operator's results.  If no tuple in the scan has
+   <literal>xs_recheckorderby</literal> set, the executor does not examine
+   these values.  This provision supports <quote>lossy</quote>
+   distance functions, such as a distance computed from a bounding box.  It
+   is not supported in index-only scans; an error is raised if
+   <literal>xs_recheckorderby</literal> is set during one.
+  </para>
+
+  <para>
    If the index supports <link linkend="indexes-index-only-scans">index-only
    scans</link> (i.e., <function>amcanreturn</function> returns true for any
    of its columns),

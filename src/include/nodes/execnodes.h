@@ -1744,6 +1744,16 @@ typedef struct
  *		OrderByTypByVals   is the datatype of order by expression pass-by-value?
  *		OrderByTypLens	   typlens of the datatypes of order by expressions
  *		PscanLen		   size of parallel index scan descriptor
+ *
+ *		ReorderQueue, OrderByValues, OrderByNulls, SortSupport,
+ *		OrderByTypByVals and OrderByTypLens are allocated only when the scan
+ *		uses ORDER BY operators (amcanorderbyop, NumOrderByKeys > 0), not for
+ *		the ordering an amcanorder index such as btree provides.  They are
+ *		used to recheck and reorder tuples for which the index reports only a
+ *		lower bound on the ORDER BY values (xs_recheckorderby).  OrderByValues
+ *		holds the values recomputed from the heap tuple, as opposed to the
+ *		index's values in xs_orderbyvals.  See IndexNextWithReorder in
+ *		nodeIndexscan.c.
  * ----------------
  */
 typedef struct IndexScanState
@@ -1764,7 +1774,7 @@ typedef struct IndexScanState
 	IndexScanInstrumentation *iss_Instrument;
 	SharedIndexScanInstrumentation *iss_SharedInfo;
 
-	/* These are needed for re-checking ORDER BY expr ordering */
+	/* These are needed for re-checking ORDER BY operator ordering */
 	pairingheap *iss_ReorderQueue;
 	bool		iss_ReachedEnd;
 	Datum	   *iss_OrderByValues;

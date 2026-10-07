@@ -46,8 +46,12 @@
 #include "utils/sortsupport.h"
 
 /*
- * When an ordering operator is used, tuples fetched from the index that
- * need to be reordered are queued in a pairing heap, as ReorderTuples.
+ * When the index reports inexact ORDER BY values (xs_recheckorderby),
+ * IndexNextWithReorder holds back tuples that cannot be returned yet in a
+ * pairing heap, as ReorderTuples.  htup is a copy of the heap tuple.
+ * orderbyvals/orderbynulls are its ORDER BY values: recomputed from the heap
+ * tuple if the index flagged them inexact (xs_recheckorderby), otherwise as
+ * the index reported them.
  */
 typedef struct
 {
@@ -165,8 +169,49 @@ IndexNext(IndexScanState *node)
 /* ----------------------------------------------------------------
  *		IndexNextWithReorder
  *
- *		Like IndexNext, but this version can also re-check ORDER BY
- *		expressions, and reorder the tuples as necessary.
+ *		Like IndexNext, but used when the scan has ORDER BY operators
+ *		(amcanorderbyop), as in "ORDER BY col <-> constant" on a GiST
+ *		index.  This is unrelated to the ordering an amcanorder index such
+ *		as btree provides; IndexNext handles that.
+ *
+ *		The index returns tuples in order of the ORDER BY values it reports
+ *		in xs_orderbyvals.  If it also sets xs_recheckorderby, those values
+ *		are only lower bounds on the true values; a lossy distance function
+ *		might, for example, return the distance to a bounding box rather
+ *		than to the indexed value.  The order of the bounds then need not be
+ *		the order of the true values, so the tuples must be reordered.
+ *
+ *		The index promises that each value it reports is <= the true value,
+ *		and that it returns tuples in nondecreasing order of reported value.
+ *		Together these mean that once the index has reported value X, no
+ *		tuple it returns later has a true value less than X.  So for each
+ *		tuple flagged inexact, we evaluate the original ORDER BY expressions
+ *		(indexorderbyorig) on the heap tuple; if the result is larger than
+ *		the reported value, we hold the tuple in a pairing heap keyed by the
+ *		recomputed values.  A queued tuple can be returned once the index
+ *		reports a value at least as large as the tuple's, or reaches the end
+ *		of the scan.  A tuple whose value is exact (including one whose
+ *		recomputed value equals the reported one) is returned at once, unless
+ *		the queue holds a tuple that sorts before it, in which case it is
+ *		queued too.  Values reported without xs_recheckorderby are taken as
+ *		exact and compared with recomputed ones, so in a scan that mixes the
+ *		two they must equal the true values.
+ *
+ *		Only the first promise is checked, and only for tuples flagged
+ *		inexact: if a recomputed value is less than the value the index
+ *		reported for that tuple, the index has violated its contract, and we
+ *		raise "index returned tuples in wrong order".  A violation of the
+ *		second is not detected, and can make the output silently misordered.
+ *
+ *		If the index never sets xs_recheckorderby, the queue stays empty and
+ *		each tuple is returned as soon as it is fetched.  Otherwise, every
+ *		tuple flagged inexact costs an evaluation of the ORDER BY
+ *		expressions, and every queued tuple is copied into query memory.  A
+ *		tuple whose reported value is below its true value cannot be returned
+ *		until the index has reported a value at least as large as the true
+ *		value, or the scan has ended, so returning even the first row can
+ *		require fetching many tuples from the index.  How many depends on how
+ *		close the index's bounds are to the true values.
  * ----------------------------------------------------------------
  */
 static TupleTableSlot *
@@ -234,7 +279,10 @@ IndexNextWithReorder(IndexScanState *node)
 		/*
 		 * Check the reorder queue first.  If the topmost tuple in the queue
 		 * has an ORDER BY value smaller than (or equal to) the value last
-		 * returned by the index, we can return it now.
+		 * returned by the index, we can return it now.  We must compare with
+		 * the value the index reported, not with the value recomputed from
+		 * the last fetched tuple: only the former is a bound on the tuples
+		 * the index has yet to return.
 		 */
 		if (!pairingheap_is_empty(node->iss_ReorderQueue))
 		{
@@ -307,6 +355,10 @@ next_indextuple:
 			 * the index with the recalculated value.  (If the value returned
 			 * by the index happened to be exact right, we can often avoid
 			 * pushing the tuple to the queue, just to pop it back out again.)
+			 * The index's value must be a lower bound on the recalculated
+			 * one, so a smaller recalculated value means the index (or its
+			 * operator class's distance function) is broken; see the comments
+			 * at the top of this function.
 			 */
 			cmp = cmp_orderbyvals(node->iss_OrderByValues,
 								  node->iss_OrderByNulls,
@@ -1021,7 +1073,17 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 						   NULL,	/* no ArrayKeys */
 						   NULL);
 
-	/* Initialize sort support, if we need to re-check ORDER BY exprs */
+	/*
+	 * If the scan uses ORDER BY operators (which only amcanorderbyop indexes
+	 * support), set up what IndexNextWithReorder needs to recheck and reorder
+	 * tuples whose ORDER BY values the index reports as inexact: sort support
+	 * for comparing ORDER BY values, using the sort operators the planner
+	 * chose for their result types (indexorderbyops); type information for
+	 * copying the values; arrays to hold the values recomputed from the heap
+	 * tuple; and the reorder queue.  Whether the index returns any inexact
+	 * values is known only at run time, from xs_recheckorderby on each tuple,
+	 * so this is done for every scan with ORDER BY operators.
+	 */
 	if (indexstate->iss_NumOrderByKeys > 0)
 	{
 		int			numOrderByKeys = indexstate->iss_NumOrderByKeys;
