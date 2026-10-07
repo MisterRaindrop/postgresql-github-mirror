@@ -36,6 +36,7 @@
 #ifndef FRONTEND
 #include "pgstat.h"
 #include "storage/bufmgr.h"
+#include "utils/memutils.h"
 #include "utils/wait_event.h"
 #else
 #include "common/logging.h"
@@ -55,6 +56,9 @@ static bool ValidXLogRecord(XLogReaderState *state, XLogRecord *record,
 static void ResetDecoder(XLogReaderState *state);
 static void WALOpenSegmentInit(WALOpenSegment *seg, WALSegmentContext *segcxt,
 							   int segsize, const char *waldir);
+#ifndef FRONTEND
+static void xlogreader_memory_context_reset_cb(void *arg);
+#endif
 
 /* size of the buffer allocated for error message. */
 #define MAX_ERRORMSG_LEN 1000
@@ -159,9 +163,52 @@ XLogReaderAllocate(int wal_segment_size, const char *waldir,
 	return state;
 }
 
+#ifndef FRONTEND
+/*
+ * Memory context reset callback for an XLogReader.
+ */
+static void
+xlogreader_memory_context_reset_cb(void *arg)
+{
+	XLogReaderState *state = (XLogReaderState *) arg;
+
+	/* Close the WAL segment file that was left open */
+	if (state->seg.ws_file >= 0)
+		state->routine.segment_close(state);
+}
+
+/*
+ * Register a callback to perform cleanup or release resources when the memory
+ * context holding the XLogReader is reset or deleted.
+ *
+ * This is useful when opening a WAL segment file with BasicOpenFile(), which
+ * doesn't have the automatic file descriptor cleanup that OpenTransientFile()
+ * provides, to guarantee that the segment is closed before XLogReaderFree() is
+ * reached (on ERRORs, for example).
+ */
+void
+XLogReaderRegisterResetCallback(XLogReaderState *state)
+{
+	if (state->reset_cb_registered)
+		return;
+
+	state->reset_cb.func = xlogreader_memory_context_reset_cb;
+	state->reset_cb.arg = state;
+	MemoryContextRegisterResetCallback(GetMemoryChunkContext(state),
+									   &state->reset_cb);
+	state->reset_cb_registered = true;
+}
+#endif
+
 void
 XLogReaderFree(XLogReaderState *state)
 {
+#ifndef FRONTEND
+	if (state->reset_cb_registered)
+		MemoryContextUnregisterResetCallback(GetMemoryChunkContext(state),
+											 &state->reset_cb);
+#endif
+
 	if (state->seg.ws_file != -1)
 		state->routine.segment_close(state);
 
