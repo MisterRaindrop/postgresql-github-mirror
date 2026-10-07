@@ -1047,7 +1047,8 @@ ProcessParallelApplyMessage(StringInfo msg)
 
 				/*
 				 * Context beyond that should use the error context callbacks
-				 * that were in effect in LogicalRepApplyLoop().
+				 * that were in effect before LogicalRepApplyLoop() installed
+				 * its apply error callback.
 				 */
 				error_context_stack = apply_error_context_stack;
 

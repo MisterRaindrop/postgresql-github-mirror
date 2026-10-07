@@ -4067,7 +4067,7 @@ LogicalRepApplyLoop(XLogRecPtr last_received)
 	errcallback.callback = apply_error_callback;
 	errcallback.previous = error_context_stack;
 	error_context_stack = &errcallback;
-	apply_error_context_stack = error_context_stack;
+	apply_error_context_stack = errcallback.previous;
 
 	/* This outer loop iterates once per wait. */
 	for (;;)
