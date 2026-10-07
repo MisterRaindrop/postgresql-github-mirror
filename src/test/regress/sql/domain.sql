@@ -910,6 +910,7 @@ SELECT * FROM information_schema.domains
   WHERE domain_name IN ('con', 'dom', 'pos_int', 'things')
   ORDER BY domain_name;
 
+SELECT pg_sleep(3);
 SELECT * FROM information_schema.check_constraints
   WHERE (constraint_schema, constraint_name)
         IN (SELECT constraint_schema, constraint_name

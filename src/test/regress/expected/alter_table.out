@@ -4776,6 +4776,12 @@ drop table attbl, atref;
 /* Test case for bug #18970 */
 create table attbl(a int);
 create table atref(b attbl check ((b).a is not null));
+SELECT pg_sleep(2);
+ pg_sleep 
+----------
+ 
+(1 row)
+
 alter table attbl alter column a type numeric;  -- someday this should work
 ERROR:  cannot alter table "attbl" because column "atref.b" uses its row type
 alter table atref drop constraint atref_b_check;

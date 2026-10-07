@@ -3092,6 +3092,7 @@ drop table attbl, atref;
 
 create table attbl(a int);
 create table atref(b attbl check ((b).a is not null));
+SELECT pg_sleep(2);
 alter table attbl alter column a type numeric;  -- someday this should work
 alter table atref drop constraint atref_b_check;
 

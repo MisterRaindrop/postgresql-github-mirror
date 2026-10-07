@@ -16179,7 +16179,10 @@ ATPostAlterTypeCleanup(List **wqueue, AlteredTableInfo *tab, LOCKMODE lockmode)
 		 * CONSTRAINT step, so there's no value in asking for anything weaker.
 		 */
 		if (relid != tab->relid)
+{
+char *relname = get_rel_name(relid); if (relname && strcmp(relname, "atref") == 0) pg_usleep(500000);
 			LockRelationOid(relid, AccessExclusiveLock);
+}
 
 		ATPostAlterTypeParse(oldId, relid, confrelid, InvalidOid,
 							 (char *) lfirst(def_item),
