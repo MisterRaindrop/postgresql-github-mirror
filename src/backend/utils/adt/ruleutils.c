@@ -3131,6 +3131,7 @@ pg_get_expr_worker(text *expr, Oid relid, int prettyFlags)
 		rel = try_relation_open(relid, AccessShareLock);
 		if (rel == NULL)
 			return NULL;
+if (strcmp(RelationGetRelationName(rel), "atref") == 0) pg_usleep(2000000);
 		context = deparse_context_for(RelationGetRelationName(rel), relid);
 	}
 	else

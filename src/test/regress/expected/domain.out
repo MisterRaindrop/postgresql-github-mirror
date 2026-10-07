@@ -1412,6 +1412,12 @@ SELECT * FROM information_schema.domains
  regression     | public        | things      | integer   |                          |                        |                       |                      |                    |                   |                  |                |                32 |                       2 |             0 |                    |               |                    |                | regression  | pg_catalog | int4     |               |              |            |                     | 1
 (4 rows)
 
+SELECT pg_sleep(3);
+ pg_sleep 
+----------
+ 
+(1 row)
+
 SELECT * FROM information_schema.check_constraints
   WHERE (constraint_schema, constraint_name)
         IN (SELECT constraint_schema, constraint_name
