@@ -723,10 +723,13 @@ GetFileBackupMethod(IncrementalBackupInfo *ib, const char *path,
 	if (backup_file_lookup(ib->manifest_files, path) == NULL)
 	{
 		char	   *ipath;
+		bool		found;
 
 		ipath = GetIncrementalFilePath(dboid, spcoid, relfilenumber,
 									   forknum, segno);
-		if (backup_file_lookup(ib->manifest_files, ipath) == NULL)
+		found = backup_file_lookup(ib->manifest_files, ipath) != NULL;
+		pfree(ipath);
+		if (!found)
 			return BACK_UP_FILE_FULLY;
 	}
 
