@@ -142,10 +142,33 @@ chomp($pid);
 $killme_stdout = '';
 $killme_stderr = '';
 
+# Keep another backend connected so we can tell when the postmaster has
+# noticed the crashed backend and begun restarting the server.
+my ($monitor_stdin, $monitor_stdout, $monitor_stderr) = ('', '', '');
+my $monitor = IPC::Run::start(
+	[
+		'psql', '--no-psqlrc', '--quiet', '--no-align', '--tuples-only',
+		'--set' => 'ON_ERROR_STOP=1',
+		'--file' => '-',
+		'--dbname' => $node_standby->connstr('postgres')
+	],
+	'<' => \$monitor_stdin,
+	'>' => \$monitor_stdout,
+	'2>' => \$monitor_stderr,
+	$psql_timeout);
+$monitor_stdin .= q[
+SELECT $$psql-connected$$;
+];
+ok( pump_until(
+		$monitor, $psql_timeout, \$monitor_stdout, qr/psql-connected/m),
+	'monitor connected');
+$monitor_stdout = '';
+$monitor_stderr = '';
+
 my $ret = PostgreSQL::Test::Utils::system_log('pg_ctl', 'kill', 'KILL', $pid);
 is($ret, 0, 'killed process with KILL');
 
-# Wait until the server restarts, finish consuming output.
+# Finish consuming output from the killed backend.
 $killme_stdin .= q[
 SELECT 1;
 ];
@@ -158,8 +181,23 @@ ok( pump_until(
 	"psql query died successfully after SIGKILL");
 $killme->finish;
 
-# Wait till server finishes restarting.
-$node_standby->poll_query_until('postgres', undef, '');
+# Wait until the monitor backend is terminated by the postmaster.  The killed
+# backend's own connection can fail before the postmaster begins restarting.
+$monitor_stdin .= qq[
+SELECT pg_sleep($PostgreSQL::Test::Utils::timeout_default);
+];
+ok( pump_until(
+		$monitor,
+		$psql_timeout,
+		\$monitor_stderr,
+		qr/WARNING:  terminating connection because of crash of another server process|server closed the connection unexpectedly|connection to server was lost|could not send data to server/m
+	),
+	"psql monitor died successfully after SIGKILL");
+$monitor->finish;
+
+# Now wait till server finishes restarting.
+is($node_standby->poll_query_until('postgres', undef, ''),
+	"1", "reconnected after SIGKILL");
 
 # After recovery, the server should be able to start.
 my $stdout;
