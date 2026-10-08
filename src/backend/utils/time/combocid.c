@@ -242,7 +242,8 @@ GetComboCommandId(CommandId cmin, CommandId cmax)
 	{
 		int			newsize = sizeComboCids * 2;
 
-		comboCids = repalloc_array(comboCids, ComboCidKeyData, newsize);
+		comboCids = repalloc_array_extended(comboCids, ComboCidKeyData,
+											newsize, MCXT_ALLOC_HUGE);
 		sizeComboCids = newsize;
 	}
 
