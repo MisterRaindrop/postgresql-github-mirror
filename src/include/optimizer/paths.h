@@ -83,6 +83,12 @@ extern void create_index_paths(PlannerInfo *root, RelOptInfo *rel);
 extern bool relation_has_unique_index_for(PlannerInfo *root, RelOptInfo *rel,
 										  List *restrictlist,
 										  List **extra_clauses);
+extern Bitmapset *relation_removable_groupby_columns(RelOptInfo *rel,
+											 List *groupClause,
+											 List *targetList);
+extern bool relation_has_unique_index_covered_by_group_keys(RelOptInfo *rel,
+															List *groupClause,
+															List *targetList);
 extern bool indexcol_is_bool_constant_for_query(PlannerInfo *root,
 												IndexOptInfo *index,
 												int indexcol);

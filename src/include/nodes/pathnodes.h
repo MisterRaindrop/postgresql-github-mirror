@@ -827,9 +827,9 @@ typedef struct PartitionSchemeData *PartitionScheme;
  *				the attribute is needed as part of final targetlist
  *		attr_widths - cache space for per-attribute width estimates;
  *					  zero means not computed yet
- *		notnullattnums - zero-based set containing attnums of NOT NULL
- *						 columns (not populated for rels corresponding to
- *						 non-partitioned inh==true RTEs)
+ *		notnullattnums - set of heap attnums for columns with valid NOT
+ *							 NULL constraints (not populated for rels
+ *							 corresponding to non-partitioned inh==true RTEs)
  *		nulling_relids - relids of outer joins that can null this rel
  *		lateral_vars - lateral cross-references of rel, if any (list of
  *					   Vars and PlaceHolderVars)
@@ -1079,7 +1079,7 @@ typedef struct RelOptInfo
 	Relids	   *attr_needed pg_node_attr(read_write_ignore);
 	/* array indexed [min_attr .. max_attr] */
 	int32	   *attr_widths pg_node_attr(read_write_ignore);
-	/* zero-based set containing attnums of NOT NULL columns */
+	/* set of heap attnums for columns with valid NOT NULL constraints */
 	Bitmapset  *notnullattnums;
 	/* relids of outer joins that can null this baserel */
 	Relids		nulling_relids;
