@@ -8209,10 +8209,9 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 	 * takes from its ORDER BY values, so it can become cheaper relative to
 	 * the others; restore the cost ordering afterwards.
 	 *
-	 * An index path may emit its own target, rel->reltarget plus a value it
-	 * reads from the index (see indexonly_path_target() and
-	 * index_path_orderby_target()).  Such a path needs a projection even when
-	 * the exprs are the same, since its target has more columns than
+	 * A path may emit extra values beyond rel->reltarget (see
+	 * path_extra_exprs()).  Such a path needs a projection even when the
+	 * exprs are the same, since its target has more columns than
 	 * scanjoin_target's sortgrouprefs describe.
 	 */
 	foreach(lc, rel->pathlist)
@@ -8222,7 +8221,7 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 		/* Shouldn't have any parameterized paths anymore */
 		Assert(subpath->param_info == NULL);
 
-		if (tlist_same_exprs && subpath->pathtarget == rel->reltarget)
+		if (tlist_same_exprs && !path_emits_extras(subpath))
 			subpath->pathtarget->sortgrouprefs =
 				scanjoin_target->sortgrouprefs;
 		else
@@ -8245,7 +8244,7 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 		/* Shouldn't have any parameterized paths anymore */
 		Assert(subpath->param_info == NULL);
 
-		if (tlist_same_exprs && subpath->pathtarget == rel->reltarget)
+		if (tlist_same_exprs && !path_emits_extras(subpath))
 			subpath->pathtarget->sortgrouprefs =
 				scanjoin_target->sortgrouprefs;
 		else
