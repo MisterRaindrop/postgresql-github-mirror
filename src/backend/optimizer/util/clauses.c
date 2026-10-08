@@ -2629,7 +2629,6 @@ eval_const_expressions(PlannerInfo *root, Node *node)
 	return eval_const_expressions_mutator(node, &context);
 }
 
-#define MIN_ARRAY_SIZE_FOR_HASHED_SAOP 9
 /*--------------------
  * convert_saop_to_hashed_saop
  *
