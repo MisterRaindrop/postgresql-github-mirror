@@ -2189,6 +2189,12 @@ SELECT 2+2;
     The SQL standard specifies additional conditions that should be
     recognized.
    </para>
+
+   <para>
+    The planner can also avoid a separate grouping step in restricted cases
+    where an immediate, non-partial unique index proves that every input row
+    is its own group.
+   </para>
   </refsect2>
 
   <refsect2>
