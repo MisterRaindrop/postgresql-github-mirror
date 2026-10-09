@@ -166,12 +166,10 @@ blhandler(PG_FUNCTION_ARGS)
 void
 initBloomState(BloomState *state, Relation index)
 {
-	int			i;
-
-	state->nColumns = index->rd_att->natts;
+	state->nColumns = IndexRelationGetNumberOfKeyAttributes(index);
 
 	/* Initialize hash function for each attribute */
-	for (i = 0; i < index->rd_att->natts; i++)
+	for (int i = 0; i < state->nColumns; i++)
 	{
 		fmgr_info_copy(&(state->hashFn[i]),
 					   index_getprocinfo(index, i + 1, BLOOM_HASH_PROC),

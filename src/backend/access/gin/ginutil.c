@@ -112,7 +112,7 @@ initGinState(GinState *state, Relation index)
 	state->oneCol = (origTupdesc->natts == 1);
 	state->origTupdesc = origTupdesc;
 
-	for (i = 0; i < origTupdesc->natts; i++)
+	for (i = 0; i < IndexRelationGetNumberOfKeyAttributes(index); i++)
 	{
 		Form_pg_attribute attr = TupleDescAttr(origTupdesc, i);
 

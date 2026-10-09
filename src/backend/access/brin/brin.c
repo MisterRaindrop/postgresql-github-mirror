@@ -2103,7 +2103,7 @@ union_tuples(BrinDesc *bdesc, BrinMemTuple *a, BrinTuple *b)
 	}
 
 	/* Now we know neither range is empty. */
-	for (keyno = 0; keyno < bdesc->bd_tupdesc->natts; keyno++)
+	for (keyno = 0; keyno < IndexRelationGetNumberOfKeyAttributes(bdesc->bd_index); keyno++)
 	{
 		FmgrInfo   *unionFn;
 		BrinValues *col_a = &a->bt_columns[keyno];
@@ -2233,7 +2233,7 @@ add_values_to_range(Relation idxRel, BrinDesc *bdesc, BrinMemTuple *dtup,
 	 * Make a note of whether this happens, so that we know to insert the
 	 * modified tuple later.
 	 */
-	for (keyno = 0; keyno < bdesc->bd_tupdesc->natts; keyno++)
+	for (keyno = 0; keyno < IndexRelationGetNumberOfKeyAttributes(bdesc->bd_index); keyno++)
 	{
 		Datum		result;
 		BrinValues *bval;
