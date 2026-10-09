@@ -18,6 +18,9 @@
  * and then planning is performed as normal.  We also force re-analysis and
  * re-planning if the active search_path is different from the previous time
  * or, if RLS is involved, if the user changes or the RLS environment changes.
+ * Queries with a raw parse tree that reference ENRs are also re-analyzed if
+ * their metadata changes, because it comes from the current query environment
+ * rather than the catalogs.
  *
  * Note that if the sinval was a result of user DDL actions, parse analysis
  * could throw an error, for example if a column referenced by the query is
@@ -95,6 +98,9 @@ static dlist_head cached_expression_list = DLIST_STATIC_INIT(cached_expression_l
 static void ReleaseGenericPlan(CachedPlanSource *plansource);
 static bool StmtPlanRequiresRevalidation(CachedPlanSource *plansource);
 static bool BuildingPlanRequiresSnapshot(CachedPlanSource *plansource);
+static bool ExtractENRDependenciesWalker(Node *node, void *context);
+static bool ENRMetadataChanged(CachedPlanSource *plansource,
+							   QueryEnvironment *queryEnv);
 static List *RevalidateCachedQuery(CachedPlanSource *plansource,
 								   QueryEnvironment *queryEnv);
 static bool CheckCachedPlan(CachedPlanSource *plansource);
@@ -238,6 +244,7 @@ CreateCachedPlan(const RawStmt *raw_parse_tree,
 	plansource->query_list = NIL;
 	plansource->relationOids = NIL;
 	plansource->invalItems = NIL;
+	plansource->enrRtes = NIL;
 	plansource->search_path = NULL;
 	plansource->query_context = NULL;
 	plansource->rewriteRoleId = InvalidOid;
@@ -337,6 +344,7 @@ CreateOneShotCachedPlan(RawStmt *raw_parse_tree,
 	plansource->query_list = NIL;
 	plansource->relationOids = NIL;
 	plansource->invalItems = NIL;
+	plansource->enrRtes = NIL;
 	plansource->search_path = NULL;
 	plansource->query_context = NULL;
 	plansource->rewriteRoleId = InvalidOid;
@@ -457,6 +465,10 @@ CompleteCachedPlan(CachedPlanSource *plansource,
 								   &plansource->relationOids,
 								   &plansource->invalItems,
 								   &plansource->dependsOnRLS);
+		/* Only raw parse sources can refresh ENR metadata by re-analysis. */
+		if (plansource->raw_parse_tree != NULL)
+			ExtractENRDependenciesWalker((Node *) querytree_list,
+										 &plansource->enrRtes);
 
 		/* Update RLS info as well. */
 		plansource->rewriteRoleId = GetUserId();
@@ -676,6 +688,81 @@ BuildingPlanRequiresSnapshot(CachedPlanSource *plansource)
 }
 
 /*
+ * Collect pointers to ENR RTEs in the cached query trees.  Keeping these in
+ * query_context lets us check ENR metadata before reuse without walking the
+ * query trees again.  Queries without ENRs have no such work on reuse.
+ */
+static bool
+ExtractENRDependenciesWalker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Query))
+	{
+		Query	   *query = (Query *) node;
+
+		/*
+		 * EXPLAIN, DECLARE CURSOR, and CREATE TABLE AS can wrap ENR queries
+		 * in utilityStmt, which query_tree_walker does not visit.
+		 */
+		if (query->commandType == CMD_UTILITY)
+		{
+			query = UtilityContainsQuery(query->utilityStmt);
+			return ExtractENRDependenciesWalker((Node *) query, context);
+		}
+		return query_tree_walker(query, ExtractENRDependenciesWalker,
+								 context, QTW_EXAMINE_RTES_BEFORE);
+	}
+	if (IsA(node, RangeTblEntry))
+	{
+		RangeTblEntry *rte = (RangeTblEntry *) node;
+		List	  **enrRtes = (List **) context;
+
+		if (rte->rtekind == RTE_NAMEDTUPLESTORE)
+			*enrRtes = lappend(*enrRtes, rte);
+
+		/*
+		 * Leave recursion into RTE contents to query_tree_walker to avoid
+		 * visiting subqueries twice.
+		 */
+		return false;
+	}
+	return expression_tree_walker(node, ExtractENRDependenciesWalker, context);
+}
+
+/*
+ * ENR metadata is supplied by the current query environment and can change
+ * without catalog invalidation.  Compare it with the metadata captured by
+ * parse analysis; the tuplestore itself can change without affecting planning.
+ */
+static bool
+ENRMetadataChanged(CachedPlanSource *plansource, QueryEnvironment *queryEnv)
+{
+	ListCell   *lc;
+
+	foreach(lc, plansource->enrRtes)
+	{
+		RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
+		EphemeralNamedRelationMetadata enr;
+
+		enr = get_visible_ENR_metadata(queryEnv, rte->enrname);
+		if (enr == NULL || enr->enrtype != ENR_NAMED_TUPLESTORE ||
+			enr->reliddesc != rte->relid || enr->enrtuples != rte->enrtuples)
+			return true;
+
+		/*
+		 * A catalog relation's descriptor is protected by the normal catalog
+		 * invalidation machinery.  A directly supplied TupleDesc has no such
+		 * protection, so conservatively re-analyze in that case.
+		 */
+		if (!OidIsValid(enr->reliddesc))
+			return true;
+	}
+
+	return false;
+}
+
+/*
  * RevalidateCachedQuery: ensure validity of analyzed-and-rewritten query tree.
  *
  * What we do here is re-acquire locks and redo parse analysis if necessary.
@@ -743,6 +830,15 @@ RevalidateCachedQuery(CachedPlanSource *plansource,
 		plansource->is_valid = false;
 
 	/*
+	 * A transition table's row count can change with each statement.  When
+	 * ENR metadata changes, discard the analyzed query as well as its plan:
+	 * replanning alone would still use the old row estimate in the cached
+	 * RTE. The invalidation path below also releases any generic plan.
+	 */
+	if (plansource->is_valid && ENRMetadataChanged(plansource, queryEnv))
+		plansource->is_valid = false;
+
+	/*
 	 * If the query is currently valid, acquire locks on the referenced
 	 * objects; then check again.  We need to do it this way to cover the race
 	 * condition that an invalidation message arrives before we get the locks.
@@ -774,6 +870,7 @@ RevalidateCachedQuery(CachedPlanSource *plansource,
 	plansource->query_list = NIL;
 	plansource->relationOids = NIL;
 	plansource->invalItems = NIL;
+	plansource->enrRtes = NIL;
 	plansource->search_path = NULL;
 
 	/*
@@ -913,6 +1010,8 @@ RevalidateCachedQuery(CachedPlanSource *plansource,
 							   &plansource->relationOids,
 							   &plansource->invalItems,
 							   &plansource->dependsOnRLS);
+	if (plansource->raw_parse_tree != NULL)
+		ExtractENRDependenciesWalker((Node *) qlist, &plansource->enrRtes);
 
 	/* Update RLS info as well. */
 	plansource->rewriteRoleId = GetUserId();
@@ -1737,6 +1836,10 @@ CopyCachedPlan(CachedPlanSource *plansource)
 	newsource->query_list = copyObject(plansource->query_list);
 	newsource->relationOids = copyObject(plansource->relationOids);
 	newsource->invalItems = copyObject(plansource->invalItems);
+	/* The dependencies must point into the copied query trees. */
+	if (plansource->enrRtes != NIL)
+		ExtractENRDependenciesWalker((Node *) newsource->query_list,
+									 &newsource->enrRtes);
 	if (plansource->search_path)
 		newsource->search_path = CopySearchPathMatcher(plansource->search_path);
 	newsource->query_context = querytree_context;
