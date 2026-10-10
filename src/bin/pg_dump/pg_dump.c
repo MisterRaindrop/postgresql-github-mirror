@@ -18953,10 +18953,19 @@ dumpConstraint(Archive *fout, const ConstraintInfo *coninfo)
 									"pg_catalog.pg_class", "INDEX",
 									fmtQualifiedDumpable(indxinfo));
 
-		appendPQExpBuffer(delq, "ALTER %sTABLE ONLY %s ", foreign,
-						  fmtQualifiedDumpable(tbinfo));
-		appendPQExpBuffer(delq, "DROP CONSTRAINT %s;\n",
-						  fmtId(coninfo->dobj.name));
+		/*
+		 * If the index is attached to a partitioned index, the backend will
+		 * not allow us to drop the constraint separately.  It will go away
+		 * when we drop the parent constraint or the partition's table.  See
+		 * dumpIndex() for the implications for selective restores.
+		 */
+		if (indxinfo->parentidx == 0)
+		{
+			appendPQExpBuffer(delq, "ALTER %sTABLE ONLY %s ", foreign,
+							  fmtQualifiedDumpable(tbinfo));
+			appendPQExpBuffer(delq, "DROP CONSTRAINT %s;\n",
+							  fmtId(coninfo->dobj.name));
+		}
 
 		tag = psprintf("%s %s", tbinfo->dobj.name, coninfo->dobj.name);
 
