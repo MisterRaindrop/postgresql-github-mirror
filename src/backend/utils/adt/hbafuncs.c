@@ -54,8 +54,12 @@ static ArrayType *
 get_hba_options(HbaLine *hba)
 {
 	int			noptions;
-	Datum		options[MAX_HBA_OPTIONS];
+	int			maxoptions;
+	Datum	   *options;
 
+	/* validator.* options are unbounded */
+	maxoptions = MAX_HBA_OPTIONS + list_length(hba->oauth_opt_keys);
+	options = palloc_array(Datum, maxoptions);
 	noptions = 0;
 
 	if (hba->auth_method == uaGSS || hba->auth_method == uaSSPI)
@@ -137,6 +141,9 @@ get_hba_options(HbaLine *hba)
 
 	if (hba->auth_method == uaOAuth)
 	{
+		ListCell   *lck,
+				   *lcv;
+
 		if (hba->oauth_issuer)
 			options[noptions++] =
 				CStringGetTextDatum(psprintf("issuer=%s", hba->oauth_issuer));
@@ -152,10 +159,16 @@ get_hba_options(HbaLine *hba)
 		if (hba->oauth_skip_usermap)
 			options[noptions++] =
 				CStringGetTextDatum(psprintf("delegate_ident_mapping=true"));
+
+		forboth(lck, hba->oauth_opt_keys, lcv, hba->oauth_opt_vals)
+			options[noptions++] =
+				CStringGetTextDatum(psprintf("validator.%s=%s",
+											 (char *) lfirst(lck),
+											 (char *) lfirst(lcv)));
 	}
 
 	/* If you add more options, consider increasing MAX_HBA_OPTIONS. */
-	Assert(noptions <= MAX_HBA_OPTIONS);
+	Assert(noptions <= maxoptions);
 
 	if (noptions > 0)
 		return construct_array_builtin(options, noptions, TEXTOID);

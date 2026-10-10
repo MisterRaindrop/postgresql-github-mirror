@@ -736,11 +736,22 @@ $node->append_conf(
 local all test    oauth issuer="$issuer" scope="openid postgres" delegate_ident_mapping=1 \\
                         validator.authn_id="ignored" validator.authn_id="other-identity"
 local all testalt oauth issuer="$issuer" scope="openid postgres" validator.log="testalt message"
+local all all     trust
 });
 
 $node->reload;
 $log_start =
   $node->wait_for_log(qr/reloading configuration files/, $log_start);
+
+is( $node->safe_psql(
+		'postgres',
+		qq(SELECT rule_number, options
+			 FROM pg_hba_file_rules
+			 WHERE auth_method = 'oauth'
+			 ORDER BY rule_number;)),
+	qq{1|\{issuer=$issuer,"scope=openid postgres",validator=validator,delegate_ident_mapping=true,validator.authn_id=ignored,validator.authn_id=other-identity\}
+2|\{issuer=$issuer,"scope=openid postgres",validator=validator,"validator.log=testalt message"\}},
+	"pg_hba_file_rules shows validator options");
 
 $node->connect_ok(
 	"$common_connstr user=test",
