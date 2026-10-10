@@ -3046,6 +3046,7 @@ SubXactCallback
 SubXactCallbackItem
 SubXactEvent
 SubXactInfo
+SubplanNameEntry
 SubqueryScan
 SubqueryScanPath
 SubqueryScanState
