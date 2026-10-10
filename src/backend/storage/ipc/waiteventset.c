@@ -1688,6 +1688,26 @@ WaitEventSetWaitBlock(WaitEventSet *set, int cur_timeout,
 	}
 
 	/*
+	 * REPRO ONLY, not for commit.  Sleep while this handle is armed, so a peer
+	 * that writes and then closes gracefully has time to do both: the FIN is
+	 * latched here and consumed by the WSAEnumNetworkEvents() call below,
+	 * leaving the next WaitLatchOrSocket()'s fresh handle nothing to wake it.
+	 */
+	if (MyBackendType == B_WAL_RECEIVER)
+	{
+		static int	presleep_ms = -1;
+
+		if (presleep_ms < 0)
+		{
+			const char *s = getenv("PG_WALRCV_PRESLEEP_MS");
+
+			presleep_ms = s ? atoi(s) : 0;
+		}
+		if (presleep_ms > 0)
+			pg_usleep(presleep_ms * 1000L);
+	}
+
+	/*
 	 * Sleep.
 	 *
 	 * Need to wait for ->nevents + 1, because signal handle is in [0].
