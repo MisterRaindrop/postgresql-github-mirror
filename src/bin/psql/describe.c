@@ -5323,14 +5323,15 @@ listSchemas(const char *pattern, bool verbose, bool showSystem)
 
 		printfPQExpBuffer(&buf, "/* %s */\n",
 						  _("Get publications that publish this schema"));
-		appendPQExpBuffer(&buf,
-						  "SELECT pubname \n"
-						  "FROM pg_catalog.pg_publication p\n"
-						  "     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid\n"
-						  "     JOIN pg_catalog.pg_namespace n ON n.oid = pn.pnnspid \n"
-						  "WHERE n.nspname = '%s'\n"
-						  "ORDER BY 1",
-						  pattern);
+		appendPQExpBufferStr(&buf,
+							 "SELECT pubname \n"
+							 "FROM pg_catalog.pg_publication p\n"
+							 "     JOIN pg_catalog.pg_publication_namespace pn ON p.oid = pn.pnpubid\n"
+							 "     JOIN pg_catalog.pg_namespace n ON n.oid = pn.pnnspid \n"
+							 "WHERE n.oid = pg_catalog.to_regnamespace(");
+		appendStringLiteralConn(&buf, pattern, pset.db);
+		appendPQExpBufferStr(&buf, ")\nORDER BY 1;");
+
 		result = PSQLexec(buf.data);
 		if (!result)
 			goto error_return;
