@@ -1977,15 +1977,19 @@ remove_self_joins_recurse(PlannerInfo *root, List *joinlist)
 			RangeTblEntry *rte = root->simple_rte_array[varno];
 
 			/*
-			 * We only consider ordinary relations as candidates to be
-			 * removed, and these relations should not have TABLESAMPLE
-			 * clauses specified.  Removing a relation with TABLESAMPLE clause
-			 * could potentially change the semantics of the query. Because of
-			 * UPDATE/DELETE EPQ mechanism, currently Query->resultRelation or
+			 * We only consider ordinary relations without inheritance scans as
+			 * candidates to be removed.  A unique index on an inheritance parent
+			 * does not establish uniqueness across its children.
+			 *
+			 * These relations should not have TABLESAMPLE clauses specified.
+			 * Removing a relation with a TABLESAMPLE clause could potentially
+			 * change the semantics of the query.  Because of the UPDATE/DELETE
+			 * EPQ mechanism, currently Query->resultRelation or
 			 * Query->mergeTargetRelation associated rel cannot be eliminated.
 			 */
 			if (rte->rtekind == RTE_RELATION &&
 				rte->relkind == RELKIND_RELATION &&
+				!rte->inh &&
 				rte->tablesample == NULL &&
 				varno != root->parse->resultRelation &&
 				varno != root->parse->mergeTargetRelation)

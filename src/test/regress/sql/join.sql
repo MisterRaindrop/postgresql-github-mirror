@@ -3675,6 +3675,36 @@ ON sj_t1.id = _t2t3t4.id;
 EXPLAIN (COSTS OFF)
 SELECT a1.a FROM sj a1,sj a2 WHERE (a1.a=a2.a) FOR UPDATE;
 
+-- Self-join elimination must not merge an inheritance scan with an ONLY scan.
+CREATE TABLE sje_inh (id int, v int);
+CREATE TABLE sje_inh_child () INHERITS (sje_inh);
+CREATE UNIQUE INDEX sje_inh_id_idx ON sje_inh (id);
+
+INSERT INTO sje_inh VALUES (1, 1);
+INSERT INTO sje_inh_child VALUES (1, 100);
+ANALYZE sje_inh;
+ANALYZE sje_inh_child;
+
+SELECT p1.id, p1.v, p2.id, p2.v
+FROM sje_inh p1 JOIN ONLY sje_inh p2 ON p1.id = p2.id
+ORDER BY p1.v, p2.v;
+
+-- Check the opposite order as well.
+SELECT p1.id, p1.v, p2.id, p2.v
+FROM ONLY sje_inh p1 JOIN sje_inh p2 ON p1.id = p2.id
+ORDER BY p1.v, p2.v;
+
+-- Self-join elimination is still valid when both references use ONLY.
+EXPLAIN (COSTS OFF)
+SELECT p1.id, p1.v, p2.id, p2.v
+FROM ONLY sje_inh p1 JOIN ONLY sje_inh p2 ON p1.id = p2.id;
+
+SELECT p1.id, p1.v, p2.id, p2.v
+FROM ONLY sje_inh p1 JOIN ONLY sje_inh p2 ON p1.id = p2.id;
+
+DROP TABLE sje_inh_child;
+DROP TABLE sje_inh;
+
 reset enable_hashjoin;
 reset enable_mergejoin;
 
