@@ -18,7 +18,6 @@
 #include <unistd.h>
 
 #include "access/xlog.h"
-#include "access/xlogrecovery.h"
 #include "common/ip.h"
 #include "common/string.h"
 #include "libpq/libpq.h"
@@ -57,7 +56,8 @@ char	   *log_connections_string = NULL;
  */
 ConnectionTiming conn_timing = {.ready_for_use = TIMESTAMP_MINUS_INFINITY};
 
-static void BackendInitialize(ClientSocket *client_sock, CAC_state cac);
+static void BackendInitialize(ClientSocket *client_sock, CAC_state cac,
+							  bool reachedConsistency);
 static int	ProcessSSLStartup(Port *port);
 static int	ProcessStartupPacket(Port *port);
 static void ProcessCancelRequestPacket(Port *port, void *pkt, int pktlen);
@@ -107,7 +107,8 @@ BackendMain(const void *startup_data, size_t startup_data_len)
 #endif
 
 	/* Perform additional initialization and collect startup packet */
-	BackendInitialize(MyClientSocket, bsdata->canAcceptConnections);
+	BackendInitialize(MyClientSocket, bsdata->canAcceptConnections,
+					  bsdata->reachedConsistency);
 
 	/*
 	 * Create a per-backend PGPROC struct in shared memory.  We must do this
@@ -138,7 +139,8 @@ BackendMain(const void *startup_data, size_t startup_data_len)
  * but have not yet set up most of our local pointers to shmem structures.
  */
 static void
-BackendInitialize(ClientSocket *client_sock, CAC_state cac)
+BackendInitialize(ClientSocket *client_sock, CAC_state cac,
+				  bool reachedConsistency)
 {
 	int			status;
 	int			ret;
