@@ -90,6 +90,29 @@ RESET client_min_messages;
 CREATE PUBLICATION testpub_parsertst FOR TABLE pub_test.testpub_nopk, CURRENT_SCHEMA;
 CREATE PUBLICATION testpub_parsertst FOR TABLES IN SCHEMA foo, test.foo;
 
+-- create schema names with embedded quotes or backslashes
+-- should be able to describe them in psql
+CREATE SCHEMA "test-schema-embedded ' quote";
+CREATE SCHEMA "test-schema-embedded \ backslash";
+\dn "test-schema-embedded ' quote"
+\dn "test-schema-embedded \ backslash"
+\dn+ test-schema-embedded*
+
+-- should be able to publish them, and see that they are published
+CREATE TABLE "test-schema-embedded ' quote"."test-table-embedded ' quote"("test-col1-embedded ' quote" int, "test-col2-embedded ' quote" int);
+CREATE TABLE "test-schema-embedded \ backslash".tab1(a int);
+
+CREATE PUBLICATION regress_pub_embedded1 FOR TABLES IN SCHEMA "test-schema-embedded ' quote";
+CREATE PUBLICATION regress_pub_embedded2 FOR ALL TABLES EXCEPT (TABLE "test-schema-embedded ' quote"."test-table-embedded ' quote");
+
+\dn "test-schema-embedded ' quote"
+\d  "test-schema-embedded ' quote"."test-table-embedded ' quote"
+\dRp+ regress_pub_embedded*
+
+DROP PUBLICATION regress_pub_embedded1, regress_pub_embedded2;
+DROP SCHEMA "test-schema-embedded ' quote" CASCADE;
+DROP SCHEMA "test-schema-embedded \ backslash" CASCADE;
+
 -- should be able to add a table of the same schema to the schema publication
 ALTER PUBLICATION testpub_forschema ADD TABLE pub_test.testpub_nopk;
 \dRp+ testpub_forschema
