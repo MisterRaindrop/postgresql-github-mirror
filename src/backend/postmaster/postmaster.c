@@ -3633,8 +3633,9 @@ BackendStartup(ClientSocket *client_sock)
 		}
 	}
 
-	/* Pass down canAcceptConnections state */
+	/* Pass down the state used to handle connection acceptance. */
 	startup_data.canAcceptConnections = cac;
+	startup_data.reachedConsistency = reachedConsistency;
 	bn->rw = NULL;
 
 	/* Hasn't asked to be notified about any bgworkers yet */

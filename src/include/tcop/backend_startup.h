@@ -44,6 +44,7 @@ typedef enum CAC_state
 typedef struct BackendStartupData
 {
 	CAC_state	canAcceptConnections;
+	bool		reachedConsistency;
 
 	/*
 	 * Time at which the connection client socket is created. Only used for
