@@ -849,7 +849,7 @@ main(int argc, char **argv)
 						schema_only, "-s/--schema-only");
 
 	/* --include-foreign-data is incompatible with --schema-only */
-	check_mut_excl_opts(foreign_servers_include_patterns.head, "--include-foreign-data",
+	check_mut_excl_opts(foreign_servers_include_patterns.head != NULL, "--include-foreign-data",
 						schema_only, "-s/--schema-only");
 
 	if (numWorkers > 1 && foreign_servers_include_patterns.head != NULL)
