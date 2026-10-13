@@ -117,6 +117,8 @@ typedef enum pgssVersion
 	PGSS_V1_13,
 } pgssVersion;
 
+#define PGSS_NUM_VERSIONS (PGSS_V1_13 + 1)
+
 typedef enum pgssStoreKind
 {
 	PGSS_INVALID = -1,
@@ -324,14 +326,7 @@ static bool pgss_save = true;	/* whether to save stats across shutdown */
 PG_FUNCTION_INFO_V1(pg_stat_statements_reset);
 PG_FUNCTION_INFO_V1(pg_stat_statements_reset_1_7);
 PG_FUNCTION_INFO_V1(pg_stat_statements_reset_1_11);
-PG_FUNCTION_INFO_V1(pg_stat_statements_1_2);
-PG_FUNCTION_INFO_V1(pg_stat_statements_1_3);
-PG_FUNCTION_INFO_V1(pg_stat_statements_1_8);
-PG_FUNCTION_INFO_V1(pg_stat_statements_1_9);
-PG_FUNCTION_INFO_V1(pg_stat_statements_1_10);
-PG_FUNCTION_INFO_V1(pg_stat_statements_1_11);
-PG_FUNCTION_INFO_V1(pg_stat_statements_1_12);
-PG_FUNCTION_INFO_V1(pg_stat_statements_1_13);
+/* pg_stat_statements_1_N are declared by PG_STAT_STATEMENTS_FUNCTION */
 PG_FUNCTION_INFO_V1(pg_stat_statements);
 PG_FUNCTION_INFO_V1(pg_stat_statements_info);
 
@@ -1546,17 +1541,24 @@ pg_stat_statements_reset(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
-/* Number of output arguments (columns) for various API versions */
-#define PG_STAT_STATEMENTS_COLS_V1_0	14
-#define PG_STAT_STATEMENTS_COLS_V1_1	18
-#define PG_STAT_STATEMENTS_COLS_V1_2	19
-#define PG_STAT_STATEMENTS_COLS_V1_3	23
-#define PG_STAT_STATEMENTS_COLS_V1_8	32
-#define PG_STAT_STATEMENTS_COLS_V1_9	33
-#define PG_STAT_STATEMENTS_COLS_V1_10	43
-#define PG_STAT_STATEMENTS_COLS_V1_11	49
-#define PG_STAT_STATEMENTS_COLS_V1_12	52
-#define PG_STAT_STATEMENTS_COLS_V1_13	54
+/* Number of output columns for each SQL API version */
+static const int pgss_api_cols[] =
+{
+	[PGSS_V1_0] = 14,
+	[PGSS_V1_1] = 18,
+	[PGSS_V1_2] = 19,
+	[PGSS_V1_3] = 23,
+	[PGSS_V1_8] = 32,
+	[PGSS_V1_9] = 33,
+	[PGSS_V1_10] = 43,
+	[PGSS_V1_11] = 49,
+	[PGSS_V1_12] = 52,
+	[PGSS_V1_13] = 54,
+};
+
+StaticAssertDecl(lengthof(pgss_api_cols) == PGSS_NUM_VERSIONS,
+				 "pgss_api_cols must match pgssVersion");
+
 #define PG_STAT_STATEMENTS_COLS			54	/* maximum of above */
 
 /*
@@ -1569,85 +1571,28 @@ pg_stat_statements_reset(PG_FUNCTION_ARGS)
  * expected API version is identified by embedding it in the C name of the
  * function.  Unfortunately we weren't bright enough to do that for 1.1.
  */
-Datum
-pg_stat_statements_1_13(PG_FUNCTION_ARGS)
-{
-	bool		showtext = PG_GETARG_BOOL(0);
-
-	pg_stat_statements_internal(fcinfo, PGSS_V1_13, showtext);
-
-	return (Datum) 0;
+#define PG_STAT_STATEMENTS_FUNCTION(funcname, version)			\
+PG_FUNCTION_INFO_V1(funcname);									\
+Datum															\
+funcname(PG_FUNCTION_ARGS)										\
+{																\
+	bool		showtext = PG_GETARG_BOOL(0);					\
+																\
+	pg_stat_statements_internal(fcinfo, version, showtext);		\
+																\
+	return (Datum) 0;											\
 }
 
-Datum
-pg_stat_statements_1_12(PG_FUNCTION_ARGS)
-{
-	bool		showtext = PG_GETARG_BOOL(0);
+PG_STAT_STATEMENTS_FUNCTION(pg_stat_statements_1_13, PGSS_V1_13)
+PG_STAT_STATEMENTS_FUNCTION(pg_stat_statements_1_12, PGSS_V1_12)
+PG_STAT_STATEMENTS_FUNCTION(pg_stat_statements_1_11, PGSS_V1_11)
+PG_STAT_STATEMENTS_FUNCTION(pg_stat_statements_1_10, PGSS_V1_10)
+PG_STAT_STATEMENTS_FUNCTION(pg_stat_statements_1_9, PGSS_V1_9)
+PG_STAT_STATEMENTS_FUNCTION(pg_stat_statements_1_8, PGSS_V1_8)
+PG_STAT_STATEMENTS_FUNCTION(pg_stat_statements_1_3, PGSS_V1_3)
+PG_STAT_STATEMENTS_FUNCTION(pg_stat_statements_1_2, PGSS_V1_2)
 
-	pg_stat_statements_internal(fcinfo, PGSS_V1_12, showtext);
-
-	return (Datum) 0;
-}
-
-Datum
-pg_stat_statements_1_11(PG_FUNCTION_ARGS)
-{
-	bool		showtext = PG_GETARG_BOOL(0);
-
-	pg_stat_statements_internal(fcinfo, PGSS_V1_11, showtext);
-
-	return (Datum) 0;
-}
-
-Datum
-pg_stat_statements_1_10(PG_FUNCTION_ARGS)
-{
-	bool		showtext = PG_GETARG_BOOL(0);
-
-	pg_stat_statements_internal(fcinfo, PGSS_V1_10, showtext);
-
-	return (Datum) 0;
-}
-
-Datum
-pg_stat_statements_1_9(PG_FUNCTION_ARGS)
-{
-	bool		showtext = PG_GETARG_BOOL(0);
-
-	pg_stat_statements_internal(fcinfo, PGSS_V1_9, showtext);
-
-	return (Datum) 0;
-}
-
-Datum
-pg_stat_statements_1_8(PG_FUNCTION_ARGS)
-{
-	bool		showtext = PG_GETARG_BOOL(0);
-
-	pg_stat_statements_internal(fcinfo, PGSS_V1_8, showtext);
-
-	return (Datum) 0;
-}
-
-Datum
-pg_stat_statements_1_3(PG_FUNCTION_ARGS)
-{
-	bool		showtext = PG_GETARG_BOOL(0);
-
-	pg_stat_statements_internal(fcinfo, PGSS_V1_3, showtext);
-
-	return (Datum) 0;
-}
-
-Datum
-pg_stat_statements_1_2(PG_FUNCTION_ARGS)
-{
-	bool		showtext = PG_GETARG_BOOL(0);
-
-	pg_stat_statements_internal(fcinfo, PGSS_V1_2, showtext);
-
-	return (Datum) 0;
-}
+#undef PG_STAT_STATEMENTS_FUNCTION
 
 /*
  * Legacy entry point for pg_stat_statements() API versions 1.0 and 1.1.
@@ -1697,53 +1642,15 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 	 * being a good safety check, we need a kluge here to detect API version
 	 * 1.1, which was wedged into the code in an ill-considered way.
 	 */
-	switch (rsinfo->setDesc->natts)
-	{
-		case PG_STAT_STATEMENTS_COLS_V1_0:
-			if (api_version != PGSS_V1_0)
-				elog(ERROR, "incorrect number of output arguments");
-			break;
-		case PG_STAT_STATEMENTS_COLS_V1_1:
-			/* pg_stat_statements() should have told us 1.0 */
-			if (api_version != PGSS_V1_0)
-				elog(ERROR, "incorrect number of output arguments");
-			api_version = PGSS_V1_1;
-			break;
-		case PG_STAT_STATEMENTS_COLS_V1_2:
-			if (api_version != PGSS_V1_2)
-				elog(ERROR, "incorrect number of output arguments");
-			break;
-		case PG_STAT_STATEMENTS_COLS_V1_3:
-			if (api_version != PGSS_V1_3)
-				elog(ERROR, "incorrect number of output arguments");
-			break;
-		case PG_STAT_STATEMENTS_COLS_V1_8:
-			if (api_version != PGSS_V1_8)
-				elog(ERROR, "incorrect number of output arguments");
-			break;
-		case PG_STAT_STATEMENTS_COLS_V1_9:
-			if (api_version != PGSS_V1_9)
-				elog(ERROR, "incorrect number of output arguments");
-			break;
-		case PG_STAT_STATEMENTS_COLS_V1_10:
-			if (api_version != PGSS_V1_10)
-				elog(ERROR, "incorrect number of output arguments");
-			break;
-		case PG_STAT_STATEMENTS_COLS_V1_11:
-			if (api_version != PGSS_V1_11)
-				elog(ERROR, "incorrect number of output arguments");
-			break;
-		case PG_STAT_STATEMENTS_COLS_V1_12:
-			if (api_version != PGSS_V1_12)
-				elog(ERROR, "incorrect number of output arguments");
-			break;
-		case PG_STAT_STATEMENTS_COLS_V1_13:
-			if (api_version != PGSS_V1_13)
-				elog(ERROR, "incorrect number of output arguments");
-			break;
-		default:
-			elog(ERROR, "incorrect number of output arguments");
-	}
+	Assert(api_version < PGSS_NUM_VERSIONS);
+	if (api_version == PGSS_V1_0 &&
+		rsinfo->setDesc->natts == pgss_api_cols[PGSS_V1_1])
+		api_version = PGSS_V1_1;
+	else if (rsinfo->setDesc->natts != pgss_api_cols[api_version])
+		elog(ERROR, "incorrect number of output arguments");
+
+	/* values[] and nulls[] below are sized for the largest version */
+	Assert(pgss_api_cols[api_version] <= PG_STAT_STATEMENTS_COLS);
 
 	/*
 	 * We'd like to load the query text file (if needed) while not holding any
@@ -2005,17 +1912,7 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 			values[i++] = TimestampTzGetDatum(minmax_stats_since);
 		}
 
-		Assert(i == (api_version == PGSS_V1_0 ? PG_STAT_STATEMENTS_COLS_V1_0 :
-					 api_version == PGSS_V1_1 ? PG_STAT_STATEMENTS_COLS_V1_1 :
-					 api_version == PGSS_V1_2 ? PG_STAT_STATEMENTS_COLS_V1_2 :
-					 api_version == PGSS_V1_3 ? PG_STAT_STATEMENTS_COLS_V1_3 :
-					 api_version == PGSS_V1_8 ? PG_STAT_STATEMENTS_COLS_V1_8 :
-					 api_version == PGSS_V1_9 ? PG_STAT_STATEMENTS_COLS_V1_9 :
-					 api_version == PGSS_V1_10 ? PG_STAT_STATEMENTS_COLS_V1_10 :
-					 api_version == PGSS_V1_11 ? PG_STAT_STATEMENTS_COLS_V1_11 :
-					 api_version == PGSS_V1_12 ? PG_STAT_STATEMENTS_COLS_V1_12 :
-					 api_version == PGSS_V1_13 ? PG_STAT_STATEMENTS_COLS_V1_13 :
-					 -1 /* fail if you forget to update this assert */ ));
+		Assert(i == pgss_api_cols[api_version]);
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
