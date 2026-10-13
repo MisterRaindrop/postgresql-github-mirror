@@ -6247,7 +6247,7 @@ lookup_object_oid(EditableObjectType obj_type, const char *desc,
 		destroyPQExpBuffer(query);
 		return false;
 	}
-	res = PQexec(pset.db, query->data);
+	res = PQexec(pset.db, skip_nonascii_label(query->data));
 	if (PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) == 1)
 		*obj_oid = atooid(PQgetvalue(res, 0, 0));
 	else
@@ -6315,7 +6315,7 @@ get_create_object_cmd(EditableObjectType obj_type, Oid oid,
 		destroyPQExpBuffer(query);
 		return false;
 	}
-	res = PQexec(pset.db, query->data);
+	res = PQexec(pset.db, skip_nonascii_label(query->data));
 	if (PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) == 1)
 	{
 		resetPQExpBuffer(buf);

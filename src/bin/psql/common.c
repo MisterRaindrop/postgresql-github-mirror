@@ -644,6 +644,33 @@ PrintTiming(double elapsed_msec)
 
 
 /*
+ * skip_nonascii_label
+ *
+ * A hidden query can start with a translated label in a comment.  The
+ * translation is in the encoding of the locale.  If that is not the client
+ * encoding and the label is not plain ASCII, the server could reject it, so
+ * the query must be sent without the label.  Returns the place in "query" to
+ * send from.
+ */
+const char *
+skip_nonascii_label(const char *query)
+{
+	if (strncmp(query, "/* ", 3) == 0 &&
+		pset.encoding != pg_get_encoding_from_locale(NULL, false))
+	{
+		const char *end = strstr(query, " */\n");
+
+		for (const char *p = query; end != NULL && p < end; p++)
+		{
+			if (IS_HIGHBIT_SET(*p))
+				return end + 4;
+		}
+	}
+
+	return query;
+}
+
+/*
  * PSQLexec
  *
  * This is the way to send "backdoor" queries (those not directly entered
@@ -687,7 +714,7 @@ PSQLexec(const char *query)
 
 	SetCancelConn(pset.db);
 
-	res = PQexec(pset.db, query);
+	res = PQexec(pset.db, skip_nonascii_label(query));
 
 	ResetCancelConn();
 
