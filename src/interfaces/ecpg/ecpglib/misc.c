@@ -465,13 +465,20 @@ static pthread_mutex_t win32_pthread_once_lock = PTHREAD_MUTEX_INITIALIZER;
 void
 win32_pthread_once(volatile pthread_once_t *once, void (*fn) (void))
 {
-	if (!*once)
+	if (!win32_pthread_once_done(once))
 	{
 		pthread_mutex_lock(&win32_pthread_once_lock);
-		if (!*once)
+		if (!win32_pthread_once_done(once))
 		{
 			fn();
-			*once = true;
+#ifdef _MSC_VER
+#if defined(_M_IX86) || defined(_M_X64)
+			_ReadWriteBarrier();
+#endif
+			WriteRelease8((volatile CHAR *) once, 1);
+#else
+			__atomic_store_n(once, true, __ATOMIC_RELEASE);
+#endif
 		}
 		pthread_mutex_unlock(&win32_pthread_once_lock);
 	}
