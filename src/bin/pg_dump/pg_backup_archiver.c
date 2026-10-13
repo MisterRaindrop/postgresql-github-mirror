@@ -87,7 +87,7 @@ static int	RestoringToDB(ArchiveHandle *AH);
 static void dump_lo_buf(ArchiveHandle *AH);
 static void dumpTimestamp(ArchiveHandle *AH, const char *msg, time_t tim);
 static void SetOutput(ArchiveHandle *AH, const char *filename,
-					  const pg_compress_specification compression_spec);
+					  const pg_compress_specification compression_spec, bool append_data);
 static CompressFileHandle *SaveOutput(ArchiveHandle *AH);
 static void RestoreOutput(ArchiveHandle *AH, CompressFileHandle *savedOutput);
 
@@ -340,9 +340,14 @@ ProcessArchiveRestoreOptions(Archive *AHX)
 		StrictNamesCheck(ropt);
 }
 
-/* Public */
+/*
+ * RestoreArchive
+ *
+ * If append_data is set, then append data into file as we are restoring dump
+ * of multiple databases which was taken by pg_dumpall.
+ */
 void
-RestoreArchive(Archive *AHX)
+RestoreArchive(Archive *AHX, bool append_data)
 {
 	ArchiveHandle *AH = (ArchiveHandle *) AHX;
 	RestoreOptions *ropt = AH->public.ropt;
@@ -459,9 +464,14 @@ RestoreArchive(Archive *AHX)
 	 */
 	sav = SaveOutput(AH);
 	if (ropt->filename || ropt->compression_spec.algorithm != PG_COMPRESSION_NONE)
-		SetOutput(AH, ropt->filename, ropt->compression_spec);
+		SetOutput(AH, ropt->filename, ropt->compression_spec, append_data);
 
-	ahprintf(AH, "--\n-- PostgreSQL database dump\n--\n\n");
+	/*
+	 * pg_dumpall prints its own header and footer around its archive of
+	 * global objects, so leave out ours.
+	 */
+	if (!AH->dumpallGlobals)
+		ahprintf(AH, "--\n-- PostgreSQL database dump\n--\n\n");
 
 	/*
 	 * If generating plain-text output, enter restricted mode to block any
@@ -474,17 +484,20 @@ RestoreArchive(Archive *AHX)
 	if (ropt->restrict_key)
 		ahprintf(AH, "\\restrict %s\n\n", ropt->restrict_key);
 
-	if (AH->archiveRemoteVersion)
-		ahprintf(AH, "-- Dumped from database version %s\n",
-				 AH->archiveRemoteVersion);
-	if (AH->archiveDumpVersion)
-		ahprintf(AH, "-- Dumped by pg_dump version %s\n",
-				 AH->archiveDumpVersion);
+	if (!AH->dumpallGlobals)
+	{
+		if (AH->archiveRemoteVersion)
+			ahprintf(AH, "-- Dumped from database version %s\n",
+					 AH->archiveRemoteVersion);
+		if (AH->archiveDumpVersion)
+			ahprintf(AH, "-- Dumped by pg_dump version %s\n",
+					 AH->archiveDumpVersion);
 
-	ahprintf(AH, "\n");
+		ahprintf(AH, "\n");
 
-	if (AH->public.verbose)
-		dumpTimestamp(AH, "Started on", AH->createDate);
+		if (AH->public.verbose)
+			dumpTimestamp(AH, "Started on", AH->createDate);
+	}
 
 	if (ropt->single_txn)
 	{
@@ -516,11 +529,20 @@ RestoreArchive(Archive *AHX)
 			 * because at this point we're connected to the wrong database.
 			 * (The DATABASE PROPERTIES entry, if any, should be treated like
 			 * the DATABASE entry.)
+			 *
+			 * ROLE, ROLE PROPERTIES, TABLESPACE, and DROP_GLOBAL entries are
+			 * exempt: they are cluster-wide, not scoped to any database, so
+			 * dropping them is safe regardless of which database we're
+			 * connected to.
 			 */
 			if (ropt->createDB)
 			{
 				if (strcmp(te->desc, "DATABASE") != 0 &&
-					strcmp(te->desc, "DATABASE PROPERTIES") != 0)
+					strcmp(te->desc, "DATABASE PROPERTIES") != 0 &&
+					strcmp(te->desc, "ROLE") != 0 &&
+					strcmp(te->desc, "ROLE PROPERTIES") != 0 &&
+					strcmp(te->desc, "TABLESPACE") != 0 &&
+					strcmp(te->desc, "DROP_GLOBAL") != 0)
 					continue;
 			}
 
@@ -630,7 +652,9 @@ RestoreArchive(Archive *AHX)
 							 * object type.  Most of the time this matches
 							 * te->desc, so search for that; however for the
 							 * different kinds of CONSTRAINTs, we know to
-							 * search for hardcoded "DROP CONSTRAINT" instead.
+							 * search for hardcoded "DROP CONSTRAINT" instead,
+							 * and for pg_dumpall's DROP_GLOBAL entries, "DROP
+							 * DATABASE".
 							 */
 							if (strcmp(te->desc, "DEFAULT") == 0 ||
 								strcmp(te->desc, "DATABASE PROPERTIES") == 0 ||
@@ -645,6 +669,8 @@ RestoreArchive(Archive *AHX)
 									strcmp(te->desc, "CHECK CONSTRAINT") == 0 ||
 									strcmp(te->desc, "FK CONSTRAINT") == 0)
 									strcpy(buffer, "DROP CONSTRAINT");
+								else if (strcmp(te->desc, "DROP_GLOBAL") == 0)
+									strcpy(buffer, "DROP DATABASE");
 								else
 									snprintf(buffer, sizeof(buffer), "DROP %s",
 											 te->desc);
@@ -809,10 +835,13 @@ RestoreArchive(Archive *AHX)
 			ahprintf(AH, "COMMIT;\n\n");
 	}
 
-	if (AH->public.verbose)
-		dumpTimestamp(AH, "Completed on", time(NULL));
+	if (!AH->dumpallGlobals)
+	{
+		if (AH->public.verbose)
+			dumpTimestamp(AH, "Completed on", time(NULL));
 
-	ahprintf(AH, "--\n-- PostgreSQL database dump complete\n--\n\n");
+		ahprintf(AH, "--\n-- PostgreSQL database dump complete\n--\n\n");
+	}
 
 	/*
 	 * If generating plain-text output, exit restricted mode at the very end
@@ -1317,7 +1346,7 @@ PrintTOCSummary(Archive *AHX)
 
 	sav = SaveOutput(AH);
 	if (ropt->filename)
-		SetOutput(AH, ropt->filename, out_compression_spec);
+		SetOutput(AH, ropt->filename, out_compression_spec, false);
 
 	if (strftime(stamp_str, sizeof(stamp_str), PGDUMP_STRFTIME_FMT,
 				 localtime(&AH->createDate)) == 0)
@@ -1692,11 +1721,15 @@ archprintf(Archive *AH, const char *fmt, ...)
 
 /*******************************
  * Stuff below here should be 'private' to the archiver routines
+ *
+ * If append_data is set, then append data into file as we are restoring dump
+ * of multiple databases which was taken by pg_dumpall.
  *******************************/
 
 static void
 SetOutput(ArchiveHandle *AH, const char *filename,
-		  const pg_compress_specification compression_spec)
+		  const pg_compress_specification compression_spec,
+		  bool append_data)
 {
 	CompressFileHandle *CFH;
 	const char *mode;
@@ -1716,7 +1749,7 @@ SetOutput(ArchiveHandle *AH, const char *filename,
 	else
 		fn = fileno(stdout);
 
-	if (AH->mode == archModeAppend)
+	if (append_data || AH->mode == archModeAppend)
 		mode = PG_BINARY_A;
 	else
 		mode = PG_BINARY_W;
@@ -3028,6 +3061,24 @@ _tocEntryRequired(TocEntry *te, teSection curSection, ArchiveHandle *AH)
 			return 0;
 	}
 
+	/* In --no-tablespaces mode, skip creating tablespaces outright. */
+	if (ropt->noTablespace && strcmp(te->desc, "TABLESPACE") == 0)
+		return 0;
+
+	/*
+	 * Global object TOC entries (e.g., ROLEs or TABLESPACEs) must not be
+	 * ignored.  They have no te->namespace, so without this, the
+	 * --schema/--exclude-schema checks below would exclude them entirely.
+	 * DROP_GLOBAL (pg_dumpall's cross-database drops) is included here rather
+	 * than above with DATABASE/DATABASE PROPERTIES because it must be gated
+	 * on dropSchema, not createDB.
+	 */
+	if (strcmp(te->desc, "ROLE") == 0 ||
+		strcmp(te->desc, "ROLE PROPERTIES") == 0 ||
+		strcmp(te->desc, "TABLESPACE") == 0 ||
+		strcmp(te->desc, "DROP_GLOBAL") == 0)
+		return REQ_SCHEMA;
+
 	/*
 	 * Process exclusions that affect certain classes of TOC entries.
 	 */
@@ -3063,6 +3114,14 @@ _tocEntryRequired(TocEntry *te, teSection curSection, ArchiveHandle *AH)
 		if (ropt->no_subscriptions &&
 			strncmp(te->tag, "SUBSCRIPTION", strlen("SUBSCRIPTION")) == 0)
 			return 0;
+
+		/*
+		 * Comments on global objects (ROLEs or TABLESPACEs) should not be
+		 * skipped, since global objects themselves are never skipped.
+		 */
+		if (strncmp(te->tag, "ROLE", strlen("ROLE")) == 0 ||
+			strncmp(te->tag, "TABLESPACE", strlen("TABLESPACE")) == 0)
+			return REQ_SCHEMA;
 	}
 
 	/*
@@ -3092,6 +3151,14 @@ _tocEntryRequired(TocEntry *te, teSection curSection, ArchiveHandle *AH)
 		if (ropt->no_subscriptions &&
 			strncmp(te->tag, "SUBSCRIPTION", strlen("SUBSCRIPTION")) == 0)
 			return 0;
+
+		/*
+		 * Security labels on global objects (ROLEs or TABLESPACEs) should not
+		 * be skipped, since global objects themselves are never skipped.
+		 */
+		if (strncmp(te->tag, "ROLE", strlen("ROLE")) == 0 ||
+			strncmp(te->tag, "TABLESPACE", strlen("TABLESPACE")) == 0)
+			return REQ_SCHEMA;
 	}
 
 	/* If it's a subscription, maybe ignore it */
@@ -3431,6 +3498,13 @@ static void
 _doSetFixedOutputState(ArchiveHandle *AH)
 {
 	RestoreOptions *ropt = AH->public.ropt;
+
+	/*
+	 * pg_dumpall's global objects may be restored into a cluster with
+	 * default_transaction_read_only enabled, so make sure we can write.
+	 */
+	if (AH->dumpallGlobals)
+		ahprintf(AH, "SET default_transaction_read_only = off;\n");
 
 	/*
 	 * Disable timeouts to allow for slow commands, idle parallel workers, etc
@@ -3908,8 +3982,11 @@ _getObjectDescription(PQExpBuffer buf, const TocEntry *te)
 			 strcmp(type, "CONSTRAINT") == 0 ||
 			 strcmp(type, "DATABASE PROPERTIES") == 0 ||
 			 strcmp(type, "DEFAULT") == 0 ||
+			 strcmp(type, "DROP_GLOBAL") == 0 ||
 			 strcmp(type, "FK CONSTRAINT") == 0 ||
 			 strcmp(type, "INDEX") == 0 ||
+			 strcmp(type, "ROLE") == 0 ||
+			 strcmp(type, "ROLE PROPERTIES") == 0 ||
 			 strcmp(type, "RULE") == 0 ||
 			 strcmp(type, "TRIGGER") == 0 ||
 			 strcmp(type, "ROW SECURITY") == 0 ||
