@@ -2649,6 +2649,11 @@ vacuum_delay_point(bool is_analyze)
  * VacuumCostLimit set by the system.  Testing reveals that we achieve
  * the required throttling if we force a worker that has done more than 50%
  * of its share of work to sleep.
+ *
+ * The cost limit applies to the whole vacuum, not to each process taking
+ * part in it. So each process gets a share of the limit, that is
+ * vacuum_cost_limit divided by the number of active workers, and sleeps
+ * that many times longer than it would if it were vacuuming alone.
  */
 static double
 compute_parallel_delay(void)
@@ -2674,8 +2679,12 @@ compute_parallel_delay(void)
 	if ((shared_balance >= vacuum_cost_limit) &&
 		(VacuumCostBalanceLocal > 0.5 * ((double) vacuum_cost_limit / nworkers)))
 	{
-		/* Compute sleep time based on the local cost balance */
-		msec = vacuum_cost_delay * VacuumCostBalanceLocal / vacuum_cost_limit;
+		/*
+		 * Compute sleep time based on the local cost balance and the number
+		 * of active workers.
+		 */
+		msec = vacuum_cost_delay * VacuumCostBalanceLocal * nworkers /
+			vacuum_cost_limit;
 		pg_atomic_sub_fetch_u32(VacuumSharedCostBalance, VacuumCostBalanceLocal);
 		VacuumCostBalanceLocal = 0;
 	}
