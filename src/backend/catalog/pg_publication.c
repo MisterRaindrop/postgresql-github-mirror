@@ -669,7 +669,11 @@ publication_add_relation(Oid pubid, PublicationRelInfo *pri,
 		relids = GetPubPartitionOptionRelations(relids, PUBLICATION_PART_ALL,
 												relid);
 
-		InvalidatePublicationRels(relids);
+		/*
+		 * The relation is locked by the caller, which also keeps its
+		 * partitions from being dropped.
+		 */
+		InvalidatePublicationRels(relids, false);
 	}
 
 	return myself;
@@ -874,7 +878,7 @@ publication_add_schema(Oid pubid, Oid schemaid, bool if_not_exists)
 	 */
 	schemaRels = GetSchemaPublicationRelations(schemaid,
 											   PUBLICATION_PART_ALL);
-	InvalidatePublicationRels(schemaRels);
+	InvalidatePublicationRels(schemaRels, true);
 
 	return myself;
 }

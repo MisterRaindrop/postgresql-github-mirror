@@ -1204,7 +1204,7 @@ AlterPublicationOptions(ParseState *pstate, AlterPublicationStmt *stmt,
 														PUBLICATION_PART_ALL);
 		relids = list_concat_unique_oid(relids, schemarelids);
 
-		InvalidatePublicationRels(relids);
+		InvalidatePublicationRels(relids, true);
 	}
 
 	ObjectAddressSet(obj, PublicationRelationId, pubform->oid);
@@ -1216,9 +1216,18 @@ AlterPublicationOptions(ParseState *pstate, AlterPublicationStmt *stmt,
 
 /*
  * Invalidate the relations.
+ *
+ * If missing_ok is true, a relation that no longer exists is ignored.
+ *
+ * Callers that build the list without holding a lock that prevents the
+ * relations from being dropped (DROP PUBLICATION, ALTER PUBLICATION ...
+ * SET (...), a schema's tables) must pass missing_ok = true, since a relation
+ * can be dropped concurrently after the list was built.  Callers that hold a
+ * lock on every relation in the list pass false, so that a missing relation
+ * is still reported.
  */
 void
-InvalidatePublicationRels(List *relids)
+InvalidatePublicationRels(List *relids, bool missing_ok)
 {
 	/*
 	 * We don't want to send too many individual messages, at some point it's
@@ -1226,10 +1235,21 @@ InvalidatePublicationRels(List *relids)
 	 */
 	if (list_length(relids) < MAX_RELCACHE_INVAL_MSGS)
 	{
-		ListCell   *lc;
+		foreach_oid(relid, relids)
+		{
+			HeapTuple	tup;
 
-		foreach(lc, relids)
-			CacheInvalidateRelcacheByRelid(lfirst_oid(lc));
+			tup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+			if (!HeapTupleIsValid(tup))
+			{
+				if (missing_ok)
+					return;
+				elog(ERROR, "cache lookup failed for relation %u", relid);
+			}
+
+			CacheInvalidateRelcacheByTuple(tup);
+			ReleaseSysCache(tup);
+		}
 	}
 	else
 		CacheInvalidateRelcacheAll();
@@ -1755,7 +1775,7 @@ RemovePublicationRelById(Oid proid)
 	relids = GetPubPartitionOptionRelations(relids, PUBLICATION_PART_ALL,
 											pubrel->prrelid);
 
-	InvalidatePublicationRels(relids);
+	InvalidatePublicationRels(relids, true);
 
 	CatalogTupleDelete(rel, &tup->t_self);
 
@@ -1820,7 +1840,7 @@ RemovePublicationSchemaById(Oid psoid)
 	 */
 	schemaRels = GetSchemaPublicationRelations(pubsch->pnnspid,
 											   PUBLICATION_PART_ALL);
-	InvalidatePublicationRels(schemaRels);
+	InvalidatePublicationRels(schemaRels, true);
 
 	CatalogTupleDelete(rel, &tup->t_self);
 
