@@ -329,10 +329,11 @@ process_slot(const ClusterInfo *cluster, UpgradeTaskSlot *slot, const UpgradeTas
  * Returns -1 on error, else the number of ready descriptors.
  */
 static int
-select_loop(int maxFd, fd_set *input, fd_set *output)
+select_loop(int maxFd, fd_set *input, fd_set *output, fd_set *exceptions)
 {
 	fd_set		save_input = *input;
 	fd_set		save_output = *output;
+	fd_set		save_exceptions = *exceptions;
 
 	if (maxFd == 0)
 		return 0;
@@ -344,7 +345,8 @@ select_loop(int maxFd, fd_set *input, fd_set *output)
 		*input = save_input;
 		*output = save_output;
 
-		i = select(maxFd + 1, input, output, NULL, NULL);
+		*exceptions = save_exceptions;
+		i = select(maxFd + 1, input, output, exceptions, NULL);
 
 #ifndef WIN32
 		if (i < 0 && errno == EINTR)
@@ -366,10 +368,12 @@ wait_on_slots(UpgradeTaskSlot *slots, int numslots)
 {
 	fd_set		input;
 	fd_set		output;
+	fd_set		exceptions;
 	int			maxFd = 0;
 
 	FD_ZERO(&input);
 	FD_ZERO(&output);
+	FD_ZERO(&exceptions);
 
 	for (int i = 0; i < numslots; i++)
 	{
@@ -396,13 +400,16 @@ wait_on_slots(UpgradeTaskSlot *slots, int numslots)
 		if (slots[i].sock < 0)
 			pg_fatal("invalid socket");
 		FD_SET(slots[i].sock, slots[i].select_mode ? &input : &output);
+		/* Failed nonblocking connects are exceptional on Windows. */
+		if (!slots[i].select_mode)
+			FD_SET(slots[i].sock, &exceptions);
 		maxFd = Max(maxFd, slots[i].sock);
 	}
 
 	/*
 	 * If we found socket(s) to wait on, wait.
 	 */
-	if (select_loop(maxFd, &input, &output) == -1)
+	if (select_loop(maxFd, &input, &output, &exceptions) == -1)
 		pg_fatal("%s() failed: %m", "select");
 
 	/*
@@ -410,7 +417,8 @@ wait_on_slots(UpgradeTaskSlot *slots, int numslots)
 	 */
 	for (int i = 0; i < numslots; i++)
 		slots[i].ready |= (FD_ISSET(slots[i].sock, &input) ||
-						   FD_ISSET(slots[i].sock, &output));
+						   FD_ISSET(slots[i].sock, &output) ||
+						   FD_ISSET(slots[i].sock, &exceptions));
 }
 
 /*
