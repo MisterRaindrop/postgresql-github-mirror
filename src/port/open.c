@@ -207,16 +207,18 @@ pgwin32_fopen(const char *fileName, const char *mode)
 	int			openmode = 0;
 	int			fd;
 
-	if (strstr(mode, "r+"))
-		openmode |= O_RDWR;
-	else if (strchr(mode, 'r'))
+	if (strchr(mode, 'r'))
 		openmode |= O_RDONLY;
-	if (strstr(mode, "w+"))
-		openmode |= O_RDWR | O_CREAT | O_TRUNC;
-	else if (strchr(mode, 'w'))
+	if (strchr(mode, 'w'))
 		openmode |= O_WRONLY | O_CREAT | O_TRUNC;
 	if (strchr(mode, 'a'))
 		openmode |= O_WRONLY | O_CREAT | O_APPEND;
+
+	if (strchr(mode, '+'))
+	{
+		openmode &= ~O_WRONLY;
+		openmode |= O_RDWR;
+	}
 
 	if (strchr(mode, 'b'))
 		openmode |= O_BINARY;
