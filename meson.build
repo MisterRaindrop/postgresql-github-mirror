@@ -3340,6 +3340,89 @@ endif
 
 
 ###############################################################
+# Dependency compiler flags for PGXS and pg_config
+###############################################################
+
+# Meson passes a dependency's compiler flags to our own targets directly, but
+# extensions built with PGXS or using pg_config --cppflags need them spelled
+# out, as the autoconf build does: OpenSSL is part of CPPFLAGS
+# (libpq/libpq-be.h includes <openssl/ssl.h>), and ICU goes into ICU_CFLAGS.
+# Meson doesn't expose a dependency's compile arguments, so ask the tool that
+# found the dependency.
+#
+# Dependencies found by other methods get no flags here.  Method 'system' is
+# only chosen if the headers are on the compiler's default search path.
+# Libraries found with cc.find_library() may rely on extra_include_dirs, which
+# isn't passed on to PGXS at all; that is a separate, more general gap.
+
+# Run pkg-config the way Meson does for host dependencies (same program lookup,
+# same environment), so that we get the flags of the .pc files Meson used.
+pkg_config = find_program('pkg-config', required: false)
+pkg_config_env = environment()
+pkg_config_env.set('PKG_CONFIG_PATH', get_option('pkg_config_path'))
+pkg_config_sysroot = meson.get_external_property('sys_root', '')
+if pkg_config_sysroot != ''
+  pkg_config_env.set('PKG_CONFIG_SYSROOT_DIR', pkg_config_sysroot)
+endif
+pkg_config_libdir = [] + meson.get_external_property('pkg_config_libdir', [])
+if pkg_config_libdir.length() > 0
+  pkg_config_env.set('PKG_CONFIG_LIBDIR', pkg_config_libdir)
+endif
+
+# For each dependency: the dependency objects and its pkg-config modules,
+# queried together like configure's PKG_CHECK_MODULES does.
+pgxs_dep_cflags = {}
+foreach dep_name, dep_info : {
+    'openssl': [[ssl], ['openssl']],
+    'icu': [[icu, icu_i18n], ['icu-uc', 'icu-i18n']],
+  }
+  dep_objs = dep_info[0]
+  dep_flags = []
+
+  if not dep_objs[0].found()
+    # nothing to do
+  elif dep_objs[0].type_name() == 'pkgconfig'
+    pc_modules = dep_info[1]
+    if not pkg_config.found()
+      error('pkg-config not found, but needed to determine compiler flags for @0@'.format(dep_name))
+    endif
+    pc_cflags = run_command(pkg_config, '--cflags', pc_modules,
+                            env: pkg_config_env, check: false)
+    if pc_cflags.returncode() != 0
+      error('pkg-config --cflags @0@ failed:\n@1@'.format(
+        ' '.join(pc_modules), pc_cflags.stderr()))
+    endif
+    # Use the output verbatim, as configure does, keeping pkg-config's quoting
+    if pc_cflags.stdout().strip() != ''
+      dep_flags += pc_cflags.stdout().strip()
+    endif
+  elif dep_objs[0].type_name() == 'cmake'
+    # PACKAGE_INCLUDE_DIRS is set by Meson's CMake dependency wrapper from the
+    # package's <Name>_INCLUDE_DIRS, <Name>_INCLUDES or <Name>_INCLUDE_DIR
+    # variable, for both Find modules and package config files.  Those
+    # variables can't be queried directly: e.g. FindOpenSSL sets
+    # OPENSSL_INCLUDE_DIR only via find_path(), which Meson's CMake trace
+    # doesn't capture.
+    foreach dep : dep_objs
+      foreach incdir_raw : dep.get_variable(cmake: 'PACKAGE_INCLUDE_DIRS',
+                                            default_value: '').split(';')
+        incdir = incdir_raw.strip()
+        if incdir != '' and '-I' + incdir not in dep_flags
+          dep_flags += '-I' + incdir
+        endif
+      endforeach
+    endforeach
+    if dep_flags.length() == 0
+      warning('could not determine include directories of CMake dependency @0@, PGXS builds may not find its headers'.format(dep_name))
+    endif
+  endif
+
+  pgxs_dep_cflags += {dep_name: dep_flags}
+endforeach
+
+
+
+###############################################################
 # Build
 ###############################################################
 
