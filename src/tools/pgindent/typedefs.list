@@ -3026,6 +3026,7 @@ StdRdOptIndexCleanup
 StdRdOptions
 Step
 StopList
+StoredSetting
 StrategyNumber
 StreamCtl
 StreamStopReason

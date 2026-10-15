@@ -25,6 +25,8 @@ static void check_for_prepared_transactions(ClusterInfo *cluster);
 static void check_for_isn_and_int8_passing_mismatch(ClusterInfo *cluster);
 static void check_for_user_defined_postfix_ops(ClusterInfo *cluster);
 static void check_for_incompatible_polymorphics(ClusterInfo *cluster);
+static void check_for_stored_settings(ClusterInfo *cluster);
+static void check_new_cluster_stored_settings(void);
 static void check_for_tables_with_oids(ClusterInfo *cluster);
 static void check_for_not_null_inheritance(ClusterInfo *cluster);
 static void check_for_gist_inet_ops(ClusterInfo *cluster);
@@ -636,6 +638,13 @@ check_and_dump_old_cluster(void)
 		check_for_not_null_inheritance(&old_cluster);
 
 	/*
+	 * Collect role, database and function settings, so that the new cluster
+	 * can be asked which ones it would reject.  v19 also rejects
+	 * standard_conforming_strings = off.
+	 */
+	check_for_stored_settings(&old_cluster);
+
+	/*
 	 * The btree_gist extension contains gist_inet_ops and gist_cidr_ops
 	 * opclasses that do not reliably give correct answers.  We want to
 	 * deprecate and eventually remove those, and as a first step v19 marks
@@ -670,6 +679,8 @@ check_new_cluster(void)
 	check_new_cluster_is_empty();
 
 	check_loadable_libraries();
+
+	check_new_cluster_stored_settings();
 
 	switch (user_opts.transfer_mode)
 	{
@@ -1695,6 +1706,252 @@ check_for_not_null_inheritance(ClusterInfo *cluster)
 				 "    ALTER TABLE tablename ALTER column SET NOT NULL;\n"
 				 "on each column listed in the file:\n"
 				 "    %s", report.path);
+	}
+	else
+		check_ok();
+}
+
+/*
+ * Settings stored for roles, databases and functions in the old cluster.
+ * check_for_stored_settings() collects them, and
+ * check_new_cluster_stored_settings() asks the new cluster which ones it
+ * would reject.
+ */
+typedef struct
+{
+	char	   *object;			/* what the setting is attached to */
+	char	   *name;			/* name of the setting */
+} StoredSetting;
+
+static StoredSetting *stored_settings = NULL;
+static int	n_stored_settings = 0;
+
+static void
+add_stored_setting(char *object, const char *name)
+{
+	stored_settings = pg_realloc(stored_settings,
+								 (n_stored_settings + 1) * sizeof(StoredSetting));
+	stored_settings[n_stored_settings].object = object;
+	stored_settings[n_stored_settings].name = pg_strdup(name);
+	n_stored_settings++;
+}
+
+/*
+ * Regular expression matching a setconfig or proconfig entry that sets
+ * standard_conforming_strings to any spelling of false.
+ */
+#define SCS_OFF_PATTERN "^standard_conforming_strings=(0|f|fa|fal|fals|false|n|no|of|off)$"
+
+/*
+ * Callback function for processing results of query for
+ * check_for_stored_settings()'s UpgradeTask.  Remember the settings, and
+ * write functions with standard_conforming_strings = off to the report file.
+ */
+static void
+process_stored_function_settings(DbInfo *dbinfo, PGresult *res, void *arg)
+{
+	UpgradeTaskReport *report = (UpgradeTaskReport *) arg;
+	int			ntups = PQntuples(res);
+	int			i_proc = PQfnumber(res, "proc");
+	int			i_name = PQfnumber(res, "name");
+	int			i_scs_off = PQfnumber(res, "scs_off");
+
+	for (int rowno = 0; rowno < ntups; rowno++)
+	{
+		char	   *object = psprintf("function %s in database %s",
+									  PQgetvalue(res, rowno, i_proc),
+									  dbinfo->db_name);
+
+		if (PQgetvalue(res, rowno, i_scs_off)[0] == 't')
+		{
+			if (report->file == NULL &&
+				(report->file = fopen_priv(report->path, "w")) == NULL)
+				pg_fatal("could not open file \"%s\": %m", report->path);
+			fprintf(report->file, "%s\n", object);
+		}
+		add_stored_setting(object, PQgetvalue(res, rowno, i_name));
+	}
+}
+
+/*
+ * check_for_stored_settings()
+ *
+ * Collect the settings stored for roles, databases and functions, other
+ * than custom ones.  Settings for all roles in all databases are not dumped,
+ * so they don't matter.  Also verify that none of them sets
+ * standard_conforming_strings to off, which v19 rejects.
+ */
+static void
+check_for_stored_settings(ClusterInfo *cluster)
+{
+	UpgradeTaskReport report;
+	UpgradeTask *task = upgrade_task_create();
+	PGconn	   *conn;
+	PGresult   *res;
+	const char *query;
+
+	prep_status("Checking for standard_conforming_strings set to off");
+
+	report.file = NULL;
+	snprintf(report.path, sizeof(report.path), "%s/%s",
+			 log_opts.basedir,
+			 "standard_conforming_strings_off.txt");
+
+	/* Per-role and per-database settings are cluster-wide. */
+	conn = connectToServer(cluster, "template1");
+	res = executeQueryOrDie(conn,
+							"SELECT d.datname, r.rolname, "
+							"       pg_catalog.split_part(s.c, '=', 1) AS name, "
+							"       pg_catalog.lower(s.c) ~ '" SCS_OFF_PATTERN "' AS scs_off "
+							"FROM (SELECT setdatabase, setrole, "
+							"             pg_catalog.unnest(setconfig) AS c "
+							"      FROM pg_catalog.pg_db_role_setting "
+							"      WHERE setdatabase <> 0 OR setrole <> 0) s "
+							"     LEFT JOIN pg_catalog.pg_database d "
+							"            ON d.oid = s.setdatabase "
+							"     LEFT JOIN pg_catalog.pg_roles r "
+							"            ON r.oid = s.setrole "
+							"WHERE pg_catalog.strpos(pg_catalog.split_part(s.c, '=', 1), '.') = 0");
+	for (int rowno = 0; rowno < PQntuples(res); rowno++)
+	{
+		const char *datname = PQgetvalue(res, rowno, 0);
+		const char *rolname = PQgetvalue(res, rowno, 1);
+		char	   *object;
+
+		if (PQgetisnull(res, rowno, 1))
+			object = psprintf("database %s", datname);
+		else if (PQgetisnull(res, rowno, 0))
+			object = psprintf("role %s", rolname);
+		else
+			object = psprintf("role %s in database %s", rolname, datname);
+
+		if (PQgetvalue(res, rowno, 3)[0] == 't')
+		{
+			if (report.file == NULL &&
+				(report.file = fopen_priv(report.path, "w")) == NULL)
+				pg_fatal("could not open file \"%s\": %m", report.path);
+			fprintf(report.file, "%s\n", object);
+		}
+		add_stored_setting(object, PQgetvalue(res, rowno, 2));
+	}
+	PQclear(res);
+	PQfinish(conn);
+
+	/*
+	 * Functions are per-database.  The query hardcodes 16384 for
+	 * FirstNormalObjectId, as check_for_user_defined_encoding_conversions()
+	 * does.
+	 */
+	query = "SELECT p.oid::pg_catalog.regprocedure AS proc, "
+		"       pg_catalog.split_part(p.c, '=', 1) AS name, "
+		"       pg_catalog.lower(p.c) ~ '" SCS_OFF_PATTERN "' AS scs_off "
+		"FROM (SELECT oid, pg_catalog.unnest(proconfig) AS c "
+		"      FROM pg_catalog.pg_proc "
+		"      WHERE oid >= 16384 AND proconfig IS NOT NULL) p "
+		"WHERE pg_catalog.strpos(pg_catalog.split_part(p.c, '=', 1), '.') = 0";
+
+	upgrade_task_add_step(task, query, process_stored_function_settings,
+						  true, &report);
+	upgrade_task_run(task, cluster);
+	upgrade_task_free(task);
+
+	if (report.file)
+	{
+		fclose(report.file);
+		pg_log(PG_REPORT, "fatal");
+		pg_fatal("Your installation has standard_conforming_strings set to off for\n"
+				 "some roles, databases, or functions.  PostgreSQL version 19 no longer\n"
+				 "supports that setting, so this cluster cannot be upgraded.  Remove the\n"
+				 "setting from the old cluster and restart the upgrade.\n"
+				 "A list of the objects with the setting is in the file:\n"
+				 "    %s", report.path);
+	}
+	else
+		check_ok();
+}
+
+/*
+ * check_new_cluster_stored_settings()
+ *
+ * Verify that the new cluster knows every setting collected by
+ * check_for_stored_settings(), and still allows setting it per role,
+ * database or function.  Otherwise restoring the schema would fail.
+ */
+static void
+check_new_cluster_stored_settings(void)
+{
+	FILE	   *script = NULL;
+	char		output_path[MAXPGPATH];
+	PGconn	   *conn;
+	PGresult   *res;
+	PQExpBufferData query;
+
+	prep_status("Checking for stored settings the new cluster rejects");
+
+	if (n_stored_settings == 0)
+	{
+		check_ok();
+		return;
+	}
+
+	snprintf(output_path, sizeof(output_path), "%s/%s",
+			 log_opts.basedir, "rejected_settings.txt");
+
+	conn = connectToServer(&new_cluster, "template1");
+
+	/* Ask about each name once.  There are usually few distinct names. */
+	initPQExpBuffer(&query);
+	appendPQExpBufferStr(&query,
+						 "SELECT n "
+						 "FROM pg_catalog.unnest(ARRAY[");
+	for (int i = 0; i < n_stored_settings; i++)
+	{
+		bool		seen = false;
+
+		for (int j = 0; j < i && !seen; j++)
+			seen = (strcmp(stored_settings[j].name, stored_settings[i].name) == 0);
+		if (seen)
+			continue;
+		if (query.data[query.len - 1] != '[')
+			appendPQExpBufferChar(&query, ',');
+		appendStringLiteralConn(&query, stored_settings[i].name, conn);
+	}
+	appendPQExpBufferStr(&query,
+						 "]::pg_catalog.text[]) n "
+						 "WHERE pg_catalog.current_setting(n, true) IS NULL OR "
+						 "      EXISTS (SELECT 1 FROM pg_catalog.pg_settings s "
+						 "              WHERE s.name = n AND "
+						 "                    s.context NOT IN ('user', 'superuser'))");
+	res = executeQueryOrDie(conn, "%s", query.data);
+	termPQExpBuffer(&query);
+
+	for (int rowno = 0; rowno < PQntuples(res); rowno++)
+	{
+		const char *name = PQgetvalue(res, rowno, 0);
+
+		for (int i = 0; i < n_stored_settings; i++)
+		{
+			if (strcmp(stored_settings[i].name, name) != 0)
+				continue;
+			if (script == NULL &&
+				(script = fopen_priv(output_path, "w")) == NULL)
+				pg_fatal("could not open file \"%s\": %m", output_path);
+			fprintf(script, "%s: %s\n", stored_settings[i].object, name);
+		}
+	}
+	PQclear(res);
+	PQfinish(conn);
+
+	if (script)
+	{
+		fclose(script);
+		pg_log(PG_REPORT, "fatal");
+		pg_fatal("Your installation has settings for some roles, databases, or functions\n"
+				 "that the new cluster does not accept, because the setting was removed\n"
+				 "or can no longer be set this way.  Remove these settings from the old\n"
+				 "cluster and restart the upgrade.\n"
+				 "A list of the settings is in the file:\n"
+				 "    %s", output_path);
 	}
 	else
 		check_ok();
