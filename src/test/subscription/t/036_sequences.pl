@@ -382,4 +382,51 @@ $node_subscriber->wait_for_log(
 	qr/WARNING: ( [A-Z0-9]+:)? missing sequence on publisher \("public.regress_s2"\)/,
 	$log_offset);
 
+##########
+# Ensure that a subscriber sequence owned by a role the subscription owner
+# cannot SET ROLE to is reported as a permission issue, and does not prevent
+# the other sequences from being synchronized.
+##########
+
+$node_subscriber->safe_psql(
+	'postgres', qq(
+	ALTER SUBSCRIPTION regress_seq_sub CONNECTION '$publisher_connstr';
+	ALTER SUBSCRIPTION regress_seq_sub REFRESH PUBLICATION WITH (copy_data = false);
+	ALTER SUBSCRIPTION regress_seq_sub SET (password_required = false);
+	CREATE ROLE regress_seq_sub_owner LOGIN;
+	CREATE ROLE regress_seq_other;
+	GRANT CREATE ON DATABASE postgres TO regress_seq_sub_owner;
+	ALTER SEQUENCE regress_s1 OWNER TO regress_seq_sub_owner;
+	ALTER SEQUENCE regress_s3 OWNER TO regress_seq_sub_owner;
+	ALTER SEQUENCE "regress'quote" OWNER TO regress_seq_sub_owner;
+	ALTER SEQUENCE regress_s4 OWNER TO regress_seq_other;
+	ALTER SUBSCRIPTION regress_seq_sub OWNER TO regress_seq_sub_owner;
+));
+
+$node_publisher->safe_psql(
+	'postgres', qq(
+	SELECT setval('regress_s1', 500);
+	SELECT setval('regress_s4', 500);
+));
+
+$log_offset = -s $node_subscriber->logfile;
+
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION regress_seq_sub REFRESH SEQUENCES");
+
+$node_subscriber->wait_for_log(
+	qr/WARNING: ( [A-Z0-9]+:)? insufficient privileges on subscriber sequence \("public.regress_s4"\)/,
+	$log_offset);
+
+# Check - the other sequences are synced and marked as ready
+$result = $node_subscriber->safe_psql(
+	'postgres', qq(
+	SELECT srrelid::regclass, srsubstate FROM pg_subscription_rel
+	WHERE srsubstate <> 'r';
+	SELECT last_value, is_called FROM regress_s1;
+));
+is( $result, "regress_s4|i\n500|t",
+	'sequence owned by a role that cannot be switched to does not block the others'
+);
+
 done_testing();
