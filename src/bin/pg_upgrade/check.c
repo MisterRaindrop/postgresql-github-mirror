@@ -12,6 +12,7 @@
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_authid_d.h"
 #include "catalog/pg_class_d.h"
+#include "catalog/pg_proc_d.h"
 #include "fe_utils/string_utils.h"
 #include "mb/pg_wchar.h"
 #include "pg_upgrade.h"
@@ -31,6 +32,7 @@ static void check_for_gist_inet_ops(ClusterInfo *cluster);
 static void check_for_new_tablespace_dir(void);
 static void check_for_user_defined_encoding_conversions(ClusterInfo *cluster);
 static void check_for_unicode_update(ClusterInfo *cluster);
+static void check_for_locale_change(ClusterInfo *cluster, bool check_mode);
 static void check_new_cluster_replication_slots(void);
 static void check_new_cluster_subscription_configuration(void);
 static void check_old_cluster_for_valid_slots(void);
@@ -598,6 +600,15 @@ check_and_dump_old_cluster(void)
 	check_for_unicode_update(&old_cluster);
 
 	/*
+	 * PG 19 stopped using LC_CTYPE in text search, pg_trgm and fuzzystrmatch,
+	 * which changes what some indexes contain.  The real upgrade writes a
+	 * script to rebuild them at the end.
+	 */
+	if (user_opts.check &&
+		GET_MAJOR_VERSION(old_cluster.major_version) <= 1800)
+		check_for_locale_change(&old_cluster, true);
+
+	/*
 	 * PG 14 changed the function signature of encoding conversion functions.
 	 * Conversions from older versions cannot be upgraded automatically
 	 * because the user-defined functions used by the encoding conversions
@@ -742,6 +753,9 @@ issue_warnings_and_set_wal_level(void)
 	start_postmaster(&new_cluster, true);
 
 	report_extension_updates(&new_cluster);
+
+	if (GET_MAJOR_VERSION(old_cluster.major_version) <= 1800)
+		check_for_locale_change(&new_cluster, false);
 
 	stop_postmaster(false);
 }
@@ -2032,6 +2046,132 @@ check_for_unicode_update(ClusterInfo *cluster)
 		pg_log(PG_WARNING, "Your installation contains relations that might be affected by a new version of Unicode.\n"
 			   "A list of potentially-affected relations is in the file:\n"
 			   "    %s", report.path);
+	}
+	else
+		check_ok();
+}
+
+/*
+ * Callback function for processing results of query for
+ * check_for_locale_change()'s UpgradeTask.  If the query returned any rows,
+ * write REINDEX commands for them to the script.
+ */
+static void
+process_locale_change(DbInfo *dbinfo, PGresult *res, void *arg)
+{
+	UpgradeTaskReport *report = (UpgradeTaskReport *) arg;
+	int			ntups = PQntuples(res);
+	int			i_nspname = PQfnumber(res, "nspname");
+	int			i_relname = PQfnumber(res, "relname");
+	PQExpBufferData connectbuf;
+
+	if (ntups == 0)
+		return;
+
+	if (report->file == NULL &&
+		(report->file = fopen_priv(report->path, "w")) == NULL)
+		pg_fatal("could not open file \"%s\": %m", report->path);
+
+	initPQExpBuffer(&connectbuf);
+	appendPsqlMetaConnect(&connectbuf, dbinfo->db_name);
+	fputs(connectbuf.data, report->file);
+	termPQExpBuffer(&connectbuf);
+
+	for (int rowno = 0; rowno < ntups; rowno++)
+		fprintf(report->file, "REINDEX INDEX %s.%s;\n",
+				quote_identifier(PQgetvalue(res, rowno, i_nspname)),
+				quote_identifier(PQgetvalue(res, rowno, i_relname)));
+}
+
+/*
+ * check_for_locale_change()
+ *
+ * Version 19 stopped using LC_CTYPE in some places.  The text search parser
+ * and pg_trgm now follow the database's collation, which differs from
+ * LC_CTYPE when the provider is ICU or builtin.  fuzzystrmatch now upper-cases
+ * with the collation or only handles ASCII, which differs unless LC_CTYPE is
+ * C.  So indexes built by older versions can miss rows.
+ * In check mode just warn, otherwise write a script to rebuild them.  tsvector
+ * values stored in tables can be stale too, but REINDEX doesn't fix those.
+ */
+static void
+check_for_locale_change(ClusterInfo *cluster, bool check_mode)
+{
+	UpgradeTaskReport report;
+	UpgradeTask *task;
+	char	   *query;
+	const char *provider;
+
+	prep_status("Checking for indexes affected by locale changes");
+
+	report.file = NULL;
+	if (check_mode)
+		snprintf(report.path, sizeof(report.path), "%s/%s",
+				 log_opts.basedir, "reindex_locale.sql");
+	else
+		strcpy(report.path, "reindex_locale.sql");
+
+	/* Only libc could be the database default before 15. */
+	provider = GET_MAJOR_VERSION(cluster->major_version) >= 1500 ?
+		"d.datlocprovider" : "'c'";
+
+	/*
+	 * Text search expression indexes and pg_trgm indexes are found by their
+	 * opclass.  fuzzystrmatch functions belong to an extension, so indexes
+	 * using them have a dependency on them.
+	 */
+	query = psprintf("SELECT n.nspname, c.relname "
+					 "FROM pg_catalog.pg_index i "
+					 "     JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid "
+					 "     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace, "
+					 "     pg_catalog.pg_database d "
+					 "WHERE d.datname = pg_catalog.current_database() AND "
+					 "      c.relkind = 'i' AND "
+					 "      ((%s IN ('b', 'i') AND "
+					 "        EXISTS (SELECT 1 FROM pg_catalog.pg_opclass oc "
+					 "                WHERE oc.oid = ANY (i.indclass) AND "
+					 "                      (oc.opcname IN ('gin_trgm_ops', 'gist_trgm_ops') OR "
+					 "                       (oc.opcname = 'tsvector_ops' AND "
+					 "                        i.indexprs IS NOT NULL)))) OR "
+					 "       (NOT (%s = 'c' AND d.datctype IN ('C', 'POSIX')) AND "
+					 "        EXISTS (SELECT 1 FROM pg_catalog.pg_depend dep "
+					 "                     JOIN pg_catalog.pg_proc p ON p.oid = dep.refobjid "
+					 "                WHERE dep.classid = " CppAsString2(RelationRelationId) " AND "
+					 "                      dep.objid = i.indexrelid AND "
+					 "                      dep.refclassid = " CppAsString2(ProcedureRelationId) " AND "
+					 "                      p.probin LIKE '%%fuzzystrmatch' AND "
+					 "                      p.prosrc IN ('dmetaphone', 'dmetaphone_alt', "
+					 "                                   'soundex', 'difference', 'metaphone')))) "
+					 "ORDER BY 1, 2",
+					 provider, provider);
+
+	task = upgrade_task_create();
+	upgrade_task_add_step(task, query, process_locale_change,
+						  true, &report);
+	upgrade_task_run(task, cluster);
+	upgrade_task_free(task);
+	pg_free(query);
+
+	if (report.file)
+	{
+		fclose(report.file);
+		report_status(PG_WARNING, "warning");
+		if (check_mode)
+			pg_log(PG_WARNING, "\n"
+				   "Your installation contains indexes that use text search, pg_trgm or\n"
+				   "fuzzystrmatch functions whose results changed in version 19 for the\n"
+				   "database's locale settings, so these indexes can miss rows until they\n"
+				   "are rebuilt.  After upgrading, you will be given REINDEX instructions.");
+		else
+			pg_log(PG_WARNING, "\n"
+				   "Your installation contains indexes that use text search, pg_trgm or\n"
+				   "fuzzystrmatch functions whose results changed in version 19 for the\n"
+				   "database's locale settings, so these indexes can miss rows until they\n"
+				   "are rebuilt.  The file\n"
+				   "    %s\n"
+				   "when executed by psql by the database superuser will rebuild them.\n"
+				   "This does not change tsvector values stored in tables.",
+				   report.path);
 	}
 	else
 		check_ok();
