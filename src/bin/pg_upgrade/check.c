@@ -27,6 +27,8 @@ static void check_for_user_defined_postfix_ops(ClusterInfo *cluster);
 static void check_for_incompatible_polymorphics(ClusterInfo *cluster);
 static void check_for_stored_settings(ClusterInfo *cluster);
 static void check_new_cluster_stored_settings(void);
+static void check_for_user_defined_casts(ClusterInfo *cluster);
+static void check_new_cluster_casts(void);
 static void check_for_tables_with_oids(ClusterInfo *cluster);
 static void check_for_not_null_inheritance(ClusterInfo *cluster);
 static void check_for_gist_inet_ops(ClusterInfo *cluster);
@@ -644,6 +646,9 @@ check_and_dump_old_cluster(void)
 	 */
 	check_for_stored_settings(&old_cluster);
 
+	/* Same for casts that the new cluster might have built in */
+	check_for_user_defined_casts(&old_cluster);
+
 	/*
 	 * The btree_gist extension contains gist_inet_ops and gist_cidr_ops
 	 * opclasses that do not reliably give correct answers.  We want to
@@ -681,6 +686,8 @@ check_new_cluster(void)
 	check_loadable_libraries();
 
 	check_new_cluster_stored_settings();
+
+	check_new_cluster_casts();
 
 	switch (user_opts.transfer_mode)
 	{
@@ -1951,6 +1958,134 @@ check_new_cluster_stored_settings(void)
 				 "or can no longer be set this way.  Remove these settings from the old\n"
 				 "cluster and restart the upgrade.\n"
 				 "A list of the settings is in the file:\n"
+				 "    %s", output_path);
+	}
+	else
+		check_ok();
+}
+
+/*
+ * User-defined casts between built-in types in the old cluster.
+ * check_for_user_defined_casts() collects them, and check_new_cluster_casts()
+ * looks for the ones the new cluster has as built-in casts.
+ */
+typedef struct
+{
+	char	   *object;			/* description of the cast */
+	char	   *source;			/* OID of the source type, as text */
+	char	   *target;			/* OID of the target type, as text */
+} UserCast;
+
+static UserCast *user_casts = NULL;
+static int	n_user_casts = 0;
+
+/*
+ * Callback function for processing results of query for
+ * check_for_user_defined_casts()'s UpgradeTask.  Remember the casts.
+ */
+static void
+process_user_defined_casts(DbInfo *dbinfo, PGresult *res, void *arg)
+{
+	int			ntups = PQntuples(res);
+	int			i_source = PQfnumber(res, "castsource");
+	int			i_target = PQfnumber(res, "casttarget");
+	int			i_sourcename = PQfnumber(res, "sourcename");
+	int			i_targetname = PQfnumber(res, "targetname");
+
+	for (int rowno = 0; rowno < ntups; rowno++)
+	{
+		user_casts = pg_realloc(user_casts, (n_user_casts + 1) * sizeof(UserCast));
+		user_casts[n_user_casts].object =
+			psprintf("cast from %s to %s in database %s",
+					 PQgetvalue(res, rowno, i_sourcename),
+					 PQgetvalue(res, rowno, i_targetname),
+					 dbinfo->db_name);
+		user_casts[n_user_casts].source = pg_strdup(PQgetvalue(res, rowno, i_source));
+		user_casts[n_user_casts].target = pg_strdup(PQgetvalue(res, rowno, i_target));
+		n_user_casts++;
+	}
+}
+
+/*
+ * check_for_user_defined_casts()
+ *
+ * Collect user-defined casts between built-in types.  The query hardcodes
+ * 16384 for FirstNormalObjectId, as check_for_user_defined_encoding_conversions()
+ * does.
+ */
+static void
+check_for_user_defined_casts(ClusterInfo *cluster)
+{
+	UpgradeTask *task = upgrade_task_create();
+	const char *query = "SELECT c.castsource, c.casttarget, "
+		"       c.castsource::pg_catalog.regtype AS sourcename, "
+		"       c.casttarget::pg_catalog.regtype AS targetname "
+		"FROM pg_catalog.pg_cast c "
+		"WHERE c.oid >= 16384 AND "
+		"      c.castsource < 16384 AND c.casttarget < 16384";
+
+	upgrade_task_add_step(task, query, process_user_defined_casts,
+						  true, NULL);
+	upgrade_task_run(task, cluster);
+	upgrade_task_free(task);
+}
+
+/*
+ * check_new_cluster_casts()
+ *
+ * Verify that the new cluster has no built-in cast between the same types as
+ * one of the casts collected by check_for_user_defined_casts().  Otherwise
+ * restoring the schema would fail.
+ */
+static void
+check_new_cluster_casts(void)
+{
+	FILE	   *script = NULL;
+	char		output_path[MAXPGPATH];
+	PGconn	   *conn;
+	PGresult   *res;
+
+	prep_status("Checking for user-defined casts that are now built in");
+
+	if (n_user_casts == 0)
+	{
+		check_ok();
+		return;
+	}
+
+	snprintf(output_path, sizeof(output_path), "%s/%s",
+			 log_opts.basedir, "builtin_casts.txt");
+
+	conn = connectToServer(&new_cluster, "template1");
+	res = executeQueryOrDie(conn,
+							"SELECT castsource, casttarget "
+							"FROM pg_catalog.pg_cast "
+							"WHERE oid < 16384");
+
+	for (int i = 0; i < n_user_casts; i++)
+	{
+		for (int rowno = 0; rowno < PQntuples(res); rowno++)
+		{
+			if (strcmp(user_casts[i].source, PQgetvalue(res, rowno, 0)) != 0 ||
+				strcmp(user_casts[i].target, PQgetvalue(res, rowno, 1)) != 0)
+				continue;
+			if (script == NULL &&
+				(script = fopen_priv(output_path, "w")) == NULL)
+				pg_fatal("could not open file \"%s\": %m", output_path);
+			fprintf(script, "%s\n", user_casts[i].object);
+		}
+	}
+	PQclear(res);
+	PQfinish(conn);
+
+	if (script)
+	{
+		fclose(script);
+		pg_log(PG_REPORT, "fatal");
+		pg_fatal("Your installation contains user-defined casts between types that\n"
+				 "the new cluster casts between itself, so restoring them would fail.\n"
+				 "Drop these casts in the old cluster and restart the upgrade.\n"
+				 "A list of the casts is in the file:\n"
 				 "    %s", output_path);
 	}
 	else
