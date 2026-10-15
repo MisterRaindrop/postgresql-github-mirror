@@ -940,14 +940,18 @@ SnapBuildPurgeOlderTxn(SnapBuild *builder)
 
 /*
  * Handle everything that needs to be done when a transaction commits
+ *
+ * catalog_changes_relevant indicates whether the committing transaction's
+ * catalog changes (if any) can affect the decoding of this session.
  */
 void
 SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid,
-				   int nsubxacts, TransactionId *subxacts, uint32 xinfo)
+				   int nsubxacts, TransactionId *subxacts, uint32 xinfo,
+				   bool catalog_changes_relevant)
 {
 	int			nxact;
 
-	bool		needs_snapshot = false;
+	bool		has_catalog_changes = false;
 	bool		needs_timetravel = false;
 	bool		sub_needs_timetravel = false;
 
@@ -994,7 +998,7 @@ SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid,
 		if (SnapBuildXidHasCatalogChanges(builder, subxid, xinfo))
 		{
 			sub_needs_timetravel = true;
-			needs_snapshot = true;
+			has_catalog_changes = true;
 
 			elog(DEBUG1, "found subtransaction %u:%u with catalog changes",
 				 xid, subxid);
@@ -1024,7 +1028,7 @@ SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid,
 	{
 		elog(DEBUG2, "found top level transaction %u, with catalog changes",
 			 xid);
-		needs_snapshot = true;
+		has_catalog_changes = true;
 		needs_timetravel = true;
 		SnapBuildAddCommittedTxn(builder, xid);
 	}
@@ -1049,7 +1053,7 @@ SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid,
 		builder->committed.includes_all_transactions = false;
 	}
 
-	Assert(!needs_snapshot || needs_timetravel);
+	Assert(!has_catalog_changes || needs_timetravel);
 
 	/*
 	 * Adjust xmax of the snapshot builder, we only do that for committed,
@@ -1064,8 +1068,14 @@ SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid,
 		TransactionIdAdvance(builder->xmax);
 	}
 
-	/* if there's any reason to build a historic snapshot, do so now */
-	if (needs_snapshot)
+	/*
+	 * If there's any reason to build a historic snapshot, do so now.
+	 * When the catalog changes are irrelevant, neither a rebuild nor a
+	 * distribution is needed, since the builder's snapshot still reflects
+	 * every catalog visible to this session and invalidation messages
+	 * will also be filtered out by database id.
+	 */
+	if (has_catalog_changes && catalog_changes_relevant)
 	{
 		/*
 		 * If we haven't built a complete snapshot yet there's no need to hand
