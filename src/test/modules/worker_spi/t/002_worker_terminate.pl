@@ -19,12 +19,13 @@ if ($ENV{enable_injection_points} ne 'yes')
 # Returns the PID of the worker launched.
 sub launch_bgworker
 {
-	my ($node, $database, $testcase, $interruptible) = @_;
+	my ($node, $database, $testcase, $interruptible, $restartable) = @_;
+	$restartable //= 'false';
 
 	# Launch a background worker on the given database.
 	my $pid = $node->safe_psql(
 		'postgres', qq(
-        SELECT worker_spi_launch($testcase, '$database'::regdatabase, 0, '{}', $interruptible);
+        SELECT worker_spi_launch($testcase, '$database'::regdatabase, 0, '{}', $interruptible, $restartable);
     ));
 
 	# Check that the bgworker is initialized and napping.
@@ -160,5 +161,19 @@ run_bgworker_interruptible_test(
 	$node,
 	"DROP DATABASE renameddb",
 	"DROP DATABASE", $pid);
+
+# Test case 5: a restartable worker is restarted after its termination.
+$pid = launch_bgworker($node, 'postgres', 5, 'true', 'true');
+run_bgworker_interruptible_test(
+	$node,
+	"CREATE DATABASE testdb2 WITH TEMPLATE postgres",
+	"CREATE DATABASE WITH TEMPLATE, restartable worker", $pid);
+$result = $node->poll_query_until(
+	'postgres',
+	qq[SELECT count(*) FROM pg_stat_activity
+		WHERE backend_type = 'worker_spi dynamic' AND pid <> $pid
+		AND wait_event = 'WorkerSpiMain';],
+	'1');
+is($result, 1, "restartable bgworker restarted after termination");
 
 done_testing();
