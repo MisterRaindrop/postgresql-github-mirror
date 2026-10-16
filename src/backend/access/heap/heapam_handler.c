@@ -1938,6 +1938,13 @@ heapam_index_validate_scan(Relation heapRelation,
 		}
 	}
 
+	/*
+	 * Report scan progress one last time.  Each block is reported when the
+	 * scan starts on it, so the last one would not be counted as done.
+	 */
+	pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_DONE,
+								 hscan->rs_nblocks);
+
 	table_endscan(scan);
 
 	ExecDropSingleTupleTableSlot(slot);
