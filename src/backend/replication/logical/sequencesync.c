@@ -206,7 +206,9 @@ report_sequence_errors(List *mismatched_seqs_idx,
 		 * With run_as_owner enabled, sequence synchronization runs as the
 		 * subscription owner, so a missing UPDATE privilege should be granted
 		 * to that role. Otherwise, the worker switches to the sequence owner
-		 * before checking privileges, so no useful GRANT hint can be
+		 * before checking privileges, and the problem can be either that the
+		 * subscription owner cannot SET ROLE to the sequence owner or that
+		 * the sequence owner lacks UPDATE, so no useful GRANT hint can be
 		 * provided.
 		 */
 		ereport(WARNING,
@@ -407,9 +409,19 @@ copy_sequence(LogicalRepSequenceInfo *seqinfo, Oid seqowner)
 	/*
 	 * If the user did not opt to run as the owner of the subscription
 	 * ('run_as_owner'), then copy the sequence as the owner of the sequence.
+	 *
+	 * Check that we can switch to the sequence owner first, so that this is
+	 * reported like a missing privilege rather than raising an error in
+	 * SwitchToUntrustedUser() that would stop the synchronization of all the
+	 * other sequences too.
 	 */
 	if (!run_as_owner)
+	{
+		if (!member_can_set_role(GetUserId(), seqowner))
+			return COPYSEQ_SUBSCRIBER_INSUFFICIENT_PERM;
+
 		SwitchToUntrustedUser(seqowner, &ucxt);
+	}
 
 	aclresult = pg_class_aclcheck(seqoid, GetUserId(), ACL_UPDATE);
 
