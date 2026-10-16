@@ -1732,6 +1732,10 @@ process_gist_inet_ops_check(DbInfo *dbinfo, PGresult *res, void *arg)
  * Verify that no indexes use gist_inet_ops/gist_cidr_ops, unless the
  * opclasses have been changed to not-opcdefault (which would allow
  * the old server to dump the index definitions with explicit opclasses).
+ * That escape hatch does not work for the indexes of PRIMARY KEY/UNIQUE
+ * ... WITHOUT OVERLAPS constraints, since pg_dump emits those as
+ * constraint clauses that list only column names.  GiST does not support
+ * plain unique indexes, so indisunique identifies those.
  */
 static void
 check_for_gist_inet_ops(ClusterInfo *cluster)
@@ -1743,7 +1747,7 @@ check_for_gist_inet_ops(ClusterInfo *cluster)
 		"       pg_catalog.pg_class cc, pg_catalog.pg_namespace nc "
 		"WHERE  oc.opcmethod = " CppAsString2(GIST_AM_OID)
 		"       AND oc.opcname IN ('gist_inet_ops', 'gist_cidr_ops')"
-		"       AND oc.opcdefault"
+		"       AND (oc.opcdefault OR i.indisunique)"
 		"       AND oc.oid = any(i.indclass)"
 		"       AND i.indexrelid = cc.oid AND cc.relnamespace = nc.oid";
 

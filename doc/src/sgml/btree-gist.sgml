@@ -153,6 +153,15 @@ DROP INDEX bad_index;
 </programlisting>
   </para>
 
+  <para>
+   That is not possible for the index of a <literal>PRIMARY KEY</literal>
+   or <literal>UNIQUE</literal> constraint using <literal>WITHOUT
+   OVERLAPS</literal>, since such a constraint cannot specify an operator
+   class.  Such constraints (and any foreign keys referencing them) must be
+   dropped before upgrading, and re-created afterwards, when they will
+   use <literal>inet_ops</literal>.
+  </para>
+
  </sect2>
 
  <sect2 id="btree-gist-authors">

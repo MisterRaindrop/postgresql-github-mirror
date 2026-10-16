@@ -207,13 +207,12 @@
   </table>
 
  <para>
-  For historical reasons, the <literal>inet_ops</literal> operator class is
-  not the default class for types <type>inet</type> and <type>cidr</type>.
-  To use it, mention the class name in <command>CREATE INDEX</command>,
-  for example
-<programlisting>
-CREATE INDEX ON my_table USING GIST (my_inet_column inet_ops);
-</programlisting>
+  The <literal>inet_ops</literal> operator class is the default class for
+  types <type>inet</type> and <type>cidr</type>.  Before
+  <productname>PostgreSQL</productname> version 19 it was not, and had to
+  be named explicitly in <command>CREATE INDEX</command>;
+  see <xref linkend="btree-gist-inet-indexes"/> for the reasons and for
+  what this means when upgrading.
  </para>
 
 </sect2>
