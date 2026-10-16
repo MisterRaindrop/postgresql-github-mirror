@@ -5354,6 +5354,9 @@ ALTER FOREIGN TABLE ft1 ALTER COLUMN c8 TYPE user_enum;
 -- ===================================================================
 -- subtransaction
 --  + local/remote error doesn't break cursor
+--  + we allow cursors opened before a savepoint to be first fetched
+--    after the savepoint; if that subtransaction aborts, the rows already
+--    fetched can still be returned, but no more can be fetched.
 -- ===================================================================
 BEGIN;
 DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
@@ -5392,6 +5395,356 @@ SELECT * FROM ft1 ORDER BY c1 LIMIT 1;
   1 |  1 | 00001 | Fri Jan 02 00:00:00 1970 PST | Fri Jan 02 00:00:00 1970 | 1  | 1          | foo
 (1 row)
 
+COMMIT;
+-- the rows fetched in the first batch are still available
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+SAVEPOINT s;
+FETCH c;
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  1 |  1 | 00001 | Fri Jan 02 00:00:00 1970 PST | Fri Jan 02 00:00:00 1970 | 1  | 1          | foo
+(1 row)
+
+ROLLBACK TO s;
+RELEASE SAVEPOINT s;
+FETCH c;
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  2 |  2 | 00002 | Sat Jan 03 00:00:00 1970 PST | Sat Jan 03 00:00:00 1970 | 2  | 2          | foo
+(1 row)
+
+CLOSE c;
+COMMIT;
+-- but fetching another batch is not possible
+ALTER FOREIGN TABLE ft1 OPTIONS (ADD fetch_size '1');
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+SAVEPOINT s;
+FETCH c;
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  1 |  1 | 00001 | Fri Jan 02 00:00:00 1970 PST | Fri Jan 02 00:00:00 1970 | 1  | 1          | foo
+(1 row)
+
+ROLLBACK TO s;
+RELEASE SAVEPOINT s;
+FETCH c;
+ERROR:  cannot fetch more rows from foreign table "ft1"
+DETAIL:  The remote cursor was removed by rolling back the subtransaction in which it was created.
+ABORT;
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+SAVEPOINT s;
+FETCH c;
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  1 |  1 | 00001 | Fri Jan 02 00:00:00 1970 PST | Fri Jan 02 00:00:00 1970 | 1  | 1          | foo
+(1 row)
+
+ROLLBACK TO s;
+RELEASE SAVEPOINT s;
+CLOSE c;
+COMMIT;
+ALTER FOREIGN TABLE ft1 OPTIONS (DROP fetch_size);
+-- a rescan of a scan whose cursor was lost creates a new one
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+SET enable_material = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM (VALUES (1), (2), (3)) v(x),
+  LATERAL (SELECT c1 FROM ft1 WHERE c1 = v.x OFFSET 0) s;
+           QUERY PLAN            
+---------------------------------
+ Nested Loop
+   ->  Values Scan on "*VALUES*"
+   ->  Foreign Scan on ft1
+(3 rows)
+
+BEGIN;
+DECLARE c CURSOR FOR
+SELECT * FROM (VALUES (1), (2), (3)) v(x),
+  LATERAL (SELECT c1 FROM ft1 WHERE c1 = v.x OFFSET 0) s;
+SAVEPOINT s;
+FETCH c;
+ x | c1 
+---+----
+ 1 |  1
+(1 row)
+
+ROLLBACK TO s;
+FETCH ALL c;
+ x | c1 
+---+----
+ 2 |  2
+ 3 |  3
+(2 rows)
+
+COMMIT;
+RESET enable_hashjoin;
+RESET enable_mergejoin;
+RESET enable_material;
+-- cursor created in a subtransaction is handed to its parent subtransaction
+BEGIN;
+SAVEPOINT s;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+RELEASE SAVEPOINT s;
+FETCH c;
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  1 |  1 | 00001 | Fri Jan 02 00:00:00 1970 PST | Fri Jan 02 00:00:00 1970 | 1  | 1          | foo
+(1 row)
+
+SAVEPOINT s;
+FETCH c;
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  2 |  2 | 00002 | Sat Jan 03 00:00:00 1970 PST | Sat Jan 03 00:00:00 1970 | 2  | 2          | foo
+(1 row)
+
+ROLLBACK TO s;
+RELEASE SAVEPOINT s;
+FETCH c;
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  3 |  3 | 00003 | Sun Jan 04 00:00:00 1970 PST | Sun Jan 04 00:00:00 1970 | 3  | 3          | foo
+(1 row)
+
+CLOSE c;
+COMMIT;
+-- a cursor created in a subtransaction, which is released, can be first
+-- fetched in a sibling subtransaction that is then rolled back
+BEGIN;
+SAVEPOINT s1;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+RELEASE SAVEPOINT s1;
+SAVEPOINT s2;
+FETCH c;
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  1 |  1 | 00001 | Fri Jan 02 00:00:00 1970 PST | Fri Jan 02 00:00:00 1970 | 1  | 1          | foo
+(1 row)
+
+ROLLBACK TO s2;
+FETCH c;
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  2 |  2 | 00002 | Sat Jan 03 00:00:00 1970 PST | Sat Jan 03 00:00:00 1970 | 2  | 2          | foo
+(1 row)
+
+CLOSE c;
+COMMIT;
+-- the same for nested subtransactions
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+SAVEPOINT s1;
+SAVEPOINT s2;
+SAVEPOINT s3;
+FETCH c;
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  1 |  1 | 00001 | Fri Jan 02 00:00:00 1970 PST | Fri Jan 02 00:00:00 1970 | 1  | 1          | foo
+(1 row)
+
+RELEASE SAVEPOINT s3;
+ROLLBACK TO s2;
+FETCH c;
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  2 |  2 | 00002 | Sat Jan 03 00:00:00 1970 PST | Sat Jan 03 00:00:00 1970 | 2  | 2          | foo
+(1 row)
+
+CLOSE c;
+COMMIT;
+-- with a small fetch size, no more rows can be fetched if the subtransaction
+-- the remote cursor was created in has been rolled back, however deep it was
+ALTER FOREIGN TABLE ft1 OPTIONS (ADD fetch_size '1');
+BEGIN;
+SAVEPOINT s1;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+RELEASE SAVEPOINT s1;
+SAVEPOINT s2;
+FETCH c;
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  1 |  1 | 00001 | Fri Jan 02 00:00:00 1970 PST | Fri Jan 02 00:00:00 1970 | 1  | 1          | foo
+(1 row)
+
+ROLLBACK TO s2;
+FETCH c;
+ERROR:  cannot fetch more rows from foreign table "ft1"
+DETAIL:  The remote cursor was removed by rolling back the subtransaction in which it was created.
+ABORT;
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+SAVEPOINT s1;
+SAVEPOINT s2;
+SAVEPOINT s3;
+FETCH c;
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  1 |  1 | 00001 | Fri Jan 02 00:00:00 1970 PST | Fri Jan 02 00:00:00 1970 | 1  | 1          | foo
+(1 row)
+
+RELEASE SAVEPOINT s3;
+ROLLBACK TO s2;
+FETCH c;
+ERROR:  cannot fetch more rows from foreign table "ft1"
+DETAIL:  The remote cursor was removed by rolling back the subtransaction in which it was created.
+ABORT;
+-- but the cursor is fine if the subtransactions are released
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+SAVEPOINT s1;
+SAVEPOINT s2;
+FETCH c;
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  1 |  1 | 00001 | Fri Jan 02 00:00:00 1970 PST | Fri Jan 02 00:00:00 1970 | 1  | 1          | foo
+(1 row)
+
+RELEASE SAVEPOINT s2;
+RELEASE SAVEPOINT s1;
+FETCH c;
+ c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
+----+----+-------+------------------------------+--------------------------+----+------------+-----
+  2 |  2 | 00002 | Sat Jan 03 00:00:00 1970 PST | Sat Jan 03 00:00:00 1970 | 2  | 2          | foo
+(1 row)
+
+CLOSE c;
+COMMIT;
+-- a remote cursor is created within the subtransaction in which parameter
+-- evaluation happens, which may involve other foreign scans
+BEGIN;
+DECLARE c CURSOR FOR
+SELECT c1 FROM ft1 WHERE c1 = (SELECT c1 FROM ft2 ORDER BY c1 LIMIT 1);
+SAVEPOINT s;
+FETCH c;
+ c1 
+----
+  1
+(1 row)
+
+ROLLBACK TO s;
+FETCH c;
+ERROR:  cannot fetch more rows from foreign table "ft1"
+DETAIL:  The remote cursor was removed by rolling back the subtransaction in which it was created.
+ABORT;
+-- the same with a cursor opened in PL/pgSQL, fetched within a block
+DO $$
+DECLARE c refcursor; r record; n int := 0;
+BEGIN
+  OPEN c FOR SELECT c1 FROM ft1 ORDER BY c1;
+  BEGIN
+    FETCH c INTO r; n := n + 1;
+    RAISE EXCEPTION 'x';
+  EXCEPTION WHEN others THEN NULL;
+  END;
+  FETCH c INTO r; n := n + 1;
+  CLOSE c;
+  RAISE NOTICE 'n = %', n;
+END $$;
+ERROR:  cannot fetch more rows from foreign table "ft1"
+DETAIL:  The remote cursor was removed by rolling back the subtransaction in which it was created.
+CONTEXT:  PL/pgSQL function inline_code_block line 10 at FETCH
+ALTER FOREIGN TABLE ft1 OPTIONS (DROP fetch_size);
+-- ... which works if the rows are already fetched
+DO $$
+DECLARE c refcursor; r record; n int := 0;
+BEGIN
+  OPEN c FOR SELECT c1 FROM ft1 ORDER BY c1;
+  BEGIN
+    FETCH c INTO r; n := n + 1;
+    RAISE EXCEPTION 'x';
+  EXCEPTION WHEN others THEN NULL;
+  END;
+  FETCH c INTO r; n := n + 1;
+  CLOSE c;
+  RAISE NOTICE 'n = %', n;
+END $$;
+NOTICE:  n = 2
+-- an asynchronous foreign scan whose cursor was lost
+ALTER FOREIGN TABLE ft1 OPTIONS (ADD fetch_size '1', ADD async_capable 'true');
+EXPLAIN (COSTS OFF)
+SELECT c1 FROM ft1 UNION ALL SELECT c1 FROM ft1 WHERE c1 < 0;
+              QUERY PLAN               
+---------------------------------------
+ Append
+   ->  Async Foreign Scan on ft1
+   ->  Async Foreign Scan on ft1 ft1_1
+(3 rows)
+
+BEGIN;
+DECLARE c CURSOR FOR
+SELECT c1 FROM ft1 UNION ALL SELECT c1 FROM ft1 WHERE c1 < 0;
+SAVEPOINT s;
+FETCH c;
+ c1 
+----
+  1
+(1 row)
+
+ROLLBACK TO s;
+FETCH ALL c;
+ERROR:  cannot fetch more rows from foreign table "ft1"
+DETAIL:  The remote cursor was removed by rolling back the subtransaction in which it was created.
+ABORT;
+ALTER FOREIGN TABLE ft1 OPTIONS (DROP fetch_size, DROP async_capable);
+-- the same applies even if the scan is for a pushed-down join
+ALTER FOREIGN TABLE ft1 OPTIONS (ADD fetch_size '1');
+ALTER FOREIGN TABLE ft2 OPTIONS (ADD fetch_size '1');
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1) ORDER BY t1.c1;
+                                                                      QUERY PLAN                                                                       
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+ Foreign Scan
+   Output: t1.c1, t2.c1
+   Relations: (public.ft1 t1) INNER JOIN (public.ft2 t2)
+   Remote SQL: SELECT r1."C 1", r2."C 1" FROM ("S 1"."T 1" r1 INNER JOIN "S 1"."T 1" r2 ON (((r2."C 1" = r1."C 1")))) ORDER BY r1."C 1" ASC NULLS LAST
+(4 rows)
+
+BEGIN;
+DECLARE c CURSOR FOR
+SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1) ORDER BY t1.c1;
+SAVEPOINT s;
+FETCH c;
+ c1 | c1 
+----+----
+  1 |  1
+(1 row)
+
+ROLLBACK TO s;
+RELEASE SAVEPOINT s;
+FETCH c;
+ERROR:  cannot fetch more rows from this foreign scan
+DETAIL:  The remote cursor was removed by rolling back the subtransaction in which it was created.
+ABORT;
+ALTER FOREIGN TABLE ft1 OPTIONS (DROP fetch_size);
+ALTER FOREIGN TABLE ft2 OPTIONS (DROP fetch_size);
+-- an error while a cursor is fetched within a savepoint leaves the portal in
+-- the failed state, so the scan is not shut down; make sure we cope with that
+BEGIN;
+DECLARE c CURSOR FOR SELECT 1 / (c1 - 3) FROM ft1 ORDER BY c1;
+SAVEPOINT s;
+FETCH 5 c;  -- error
+ERROR:  division by zero
+ROLLBACK TO s;
+CLOSE c;
+SAVEPOINT s;
+RELEASE SAVEPOINT s;
+SELECT count(*) FROM ft1;
+ count 
+-------
+  1000
+(1 row)
+
+COMMIT;
+BEGIN;
+DECLARE c CURSOR FOR SELECT 1 / (c1 - 3) FROM ft1 ORDER BY c1;
+SAVEPOINT s;
+FETCH 5 c;  -- error
+ERROR:  division by zero
+ROLLBACK TO s;
 COMMIT;
 -- ===================================================================
 -- test handling of collations
