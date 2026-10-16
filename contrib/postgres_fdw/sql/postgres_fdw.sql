@@ -1658,6 +1658,9 @@ ALTER FOREIGN TABLE ft1 ALTER COLUMN c8 TYPE user_enum;
 -- ===================================================================
 -- subtransaction
 --  + local/remote error doesn't break cursor
+--  + we allow cursors opened before a savepoint to be first fetched
+--    after the savepoint; if that subtransaction aborts, the rows already
+--    fetched can still be returned, but no more can be fetched.
 -- ===================================================================
 BEGIN;
 DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
@@ -1671,6 +1674,226 @@ SELECT * FROM ft1 WHERE 1 / (c1 - 1) > 0;  -- ERROR
 ROLLBACK TO s;
 FETCH c;
 SELECT * FROM ft1 ORDER BY c1 LIMIT 1;
+COMMIT;
+
+-- the rows fetched in the first batch are still available
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+SAVEPOINT s;
+FETCH c;
+ROLLBACK TO s;
+RELEASE SAVEPOINT s;
+FETCH c;
+CLOSE c;
+COMMIT;
+
+-- but fetching another batch is not possible
+ALTER FOREIGN TABLE ft1 OPTIONS (ADD fetch_size '1');
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+SAVEPOINT s;
+FETCH c;
+ROLLBACK TO s;
+RELEASE SAVEPOINT s;
+FETCH c;
+ABORT;
+
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+SAVEPOINT s;
+FETCH c;
+ROLLBACK TO s;
+RELEASE SAVEPOINT s;
+CLOSE c;
+COMMIT;
+ALTER FOREIGN TABLE ft1 OPTIONS (DROP fetch_size);
+
+-- a rescan of a scan whose cursor was lost creates a new one
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+SET enable_material = off;
+EXPLAIN (COSTS OFF)
+SELECT * FROM (VALUES (1), (2), (3)) v(x),
+  LATERAL (SELECT c1 FROM ft1 WHERE c1 = v.x OFFSET 0) s;
+BEGIN;
+DECLARE c CURSOR FOR
+SELECT * FROM (VALUES (1), (2), (3)) v(x),
+  LATERAL (SELECT c1 FROM ft1 WHERE c1 = v.x OFFSET 0) s;
+SAVEPOINT s;
+FETCH c;
+ROLLBACK TO s;
+FETCH ALL c;
+COMMIT;
+RESET enable_hashjoin;
+RESET enable_mergejoin;
+RESET enable_material;
+
+-- cursor created in a subtransaction is handed to its parent subtransaction
+BEGIN;
+SAVEPOINT s;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+RELEASE SAVEPOINT s;
+FETCH c;
+SAVEPOINT s;
+FETCH c;
+ROLLBACK TO s;
+RELEASE SAVEPOINT s;
+FETCH c;
+CLOSE c;
+COMMIT;
+
+-- a cursor created in a subtransaction, which is released, can be first
+-- fetched in a sibling subtransaction that is then rolled back
+BEGIN;
+SAVEPOINT s1;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+RELEASE SAVEPOINT s1;
+SAVEPOINT s2;
+FETCH c;
+ROLLBACK TO s2;
+FETCH c;
+CLOSE c;
+COMMIT;
+
+-- the same for nested subtransactions
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+SAVEPOINT s1;
+SAVEPOINT s2;
+SAVEPOINT s3;
+FETCH c;
+RELEASE SAVEPOINT s3;
+ROLLBACK TO s2;
+FETCH c;
+CLOSE c;
+COMMIT;
+
+-- with a small fetch size, no more rows can be fetched if the subtransaction
+-- the remote cursor was created in has been rolled back, however deep it was
+ALTER FOREIGN TABLE ft1 OPTIONS (ADD fetch_size '1');
+BEGIN;
+SAVEPOINT s1;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+RELEASE SAVEPOINT s1;
+SAVEPOINT s2;
+FETCH c;
+ROLLBACK TO s2;
+FETCH c;
+ABORT;
+
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+SAVEPOINT s1;
+SAVEPOINT s2;
+SAVEPOINT s3;
+FETCH c;
+RELEASE SAVEPOINT s3;
+ROLLBACK TO s2;
+FETCH c;
+ABORT;
+
+-- but the cursor is fine if the subtransactions are released
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM ft1 ORDER BY c1;
+SAVEPOINT s1;
+SAVEPOINT s2;
+FETCH c;
+RELEASE SAVEPOINT s2;
+RELEASE SAVEPOINT s1;
+FETCH c;
+CLOSE c;
+COMMIT;
+
+-- a remote cursor is created within the subtransaction in which parameter
+-- evaluation happens, which may involve other foreign scans
+BEGIN;
+DECLARE c CURSOR FOR
+SELECT c1 FROM ft1 WHERE c1 = (SELECT c1 FROM ft2 ORDER BY c1 LIMIT 1);
+SAVEPOINT s;
+FETCH c;
+ROLLBACK TO s;
+FETCH c;
+ABORT;
+
+-- the same with a cursor opened in PL/pgSQL, fetched within a block
+DO $$
+DECLARE c refcursor; r record; n int := 0;
+BEGIN
+  OPEN c FOR SELECT c1 FROM ft1 ORDER BY c1;
+  BEGIN
+    FETCH c INTO r; n := n + 1;
+    RAISE EXCEPTION 'x';
+  EXCEPTION WHEN others THEN NULL;
+  END;
+  FETCH c INTO r; n := n + 1;
+  CLOSE c;
+  RAISE NOTICE 'n = %', n;
+END $$;
+ALTER FOREIGN TABLE ft1 OPTIONS (DROP fetch_size);
+
+-- ... which works if the rows are already fetched
+DO $$
+DECLARE c refcursor; r record; n int := 0;
+BEGIN
+  OPEN c FOR SELECT c1 FROM ft1 ORDER BY c1;
+  BEGIN
+    FETCH c INTO r; n := n + 1;
+    RAISE EXCEPTION 'x';
+  EXCEPTION WHEN others THEN NULL;
+  END;
+  FETCH c INTO r; n := n + 1;
+  CLOSE c;
+  RAISE NOTICE 'n = %', n;
+END $$;
+
+-- an asynchronous foreign scan whose cursor was lost
+ALTER FOREIGN TABLE ft1 OPTIONS (ADD fetch_size '1', ADD async_capable 'true');
+EXPLAIN (COSTS OFF)
+SELECT c1 FROM ft1 UNION ALL SELECT c1 FROM ft1 WHERE c1 < 0;
+BEGIN;
+DECLARE c CURSOR FOR
+SELECT c1 FROM ft1 UNION ALL SELECT c1 FROM ft1 WHERE c1 < 0;
+SAVEPOINT s;
+FETCH c;
+ROLLBACK TO s;
+FETCH ALL c;
+ABORT;
+ALTER FOREIGN TABLE ft1 OPTIONS (DROP fetch_size, DROP async_capable);
+
+-- the same applies even if the scan is for a pushed-down join
+ALTER FOREIGN TABLE ft1 OPTIONS (ADD fetch_size '1');
+ALTER FOREIGN TABLE ft2 OPTIONS (ADD fetch_size '1');
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1) ORDER BY t1.c1;
+BEGIN;
+DECLARE c CURSOR FOR
+SELECT t1.c1, t2.c1 FROM ft1 t1 JOIN ft2 t2 ON (t1.c1 = t2.c1) ORDER BY t1.c1;
+SAVEPOINT s;
+FETCH c;
+ROLLBACK TO s;
+RELEASE SAVEPOINT s;
+FETCH c;
+ABORT;
+ALTER FOREIGN TABLE ft1 OPTIONS (DROP fetch_size);
+ALTER FOREIGN TABLE ft2 OPTIONS (DROP fetch_size);
+
+-- an error while a cursor is fetched within a savepoint leaves the portal in
+-- the failed state, so the scan is not shut down; make sure we cope with that
+BEGIN;
+DECLARE c CURSOR FOR SELECT 1 / (c1 - 3) FROM ft1 ORDER BY c1;
+SAVEPOINT s;
+FETCH 5 c;  -- error
+ROLLBACK TO s;
+CLOSE c;
+SAVEPOINT s;
+RELEASE SAVEPOINT s;
+SELECT count(*) FROM ft1;
+COMMIT;
+BEGIN;
+DECLARE c CURSOR FOR SELECT 1 / (c1 - 3) FROM ft1 ORDER BY c1;
+SAVEPOINT s;
+FETCH 5 c;  -- error
+ROLLBACK TO s;
 COMMIT;
 
 -- ===================================================================

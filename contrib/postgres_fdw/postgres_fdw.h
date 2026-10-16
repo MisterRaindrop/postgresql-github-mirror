@@ -147,6 +147,7 @@ typedef struct PgFdwRelationInfo
 typedef struct PgFdwConnState
 {
 	AsyncRequest *pendingAreq;	/* pending async request */
+	struct ConnCacheEntry *entry;	/* link to containing ConnCacheEntry */
 } PgFdwConnState;
 
 /*
@@ -165,6 +166,8 @@ typedef enum PgFdwSamplingMethod
 extern int	set_transmission_modes(void);
 extern void reset_transmission_modes(int nestlevel);
 extern void process_pending_request(AsyncRequest *areq);
+extern void AtEOXact_ForeignScan(void);
+extern void AtEOSubXact_ForeignScan(int level, bool is_subcommit);
 
 /* in connection.c */
 extern PGconn *GetConnection(UserMapping *user, bool will_prep_stmt,
@@ -173,6 +176,7 @@ extern void ReleaseConnection(PGconn *conn);
 extern unsigned int GetCursorNumber(PGconn *conn);
 extern unsigned int GetPrepStmtNumber(PGconn *conn);
 extern void do_sql_command(PGconn *conn, const char *sql);
+extern void pgfdw_begin_remote_xact(struct ConnCacheEntry *entry);
 extern PGresult *pgfdw_get_result(PGconn *conn);
 extern PGresult *pgfdw_exec_query(PGconn *conn, const char *query,
 								  PgFdwConnState *state);

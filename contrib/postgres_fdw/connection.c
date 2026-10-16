@@ -397,7 +397,8 @@ make_new_connection(ConnCacheEntry *entry, UserMapping *user)
 	entry->mapping_hashvalue =
 		GetSysCacheHashValue1(USERMAPPINGOID,
 							  ObjectIdGetDatum(user->umid));
-	memset(&entry->state, 0, sizeof(entry->state));
+	entry->state.pendingAreq = NULL;
+	entry->state.entry = entry;
 
 	/*
 	 * Determine whether to keep the connection that we're about to make here
@@ -1062,6 +1063,20 @@ GetPrepStmtNumber(PGconn *conn)
 }
 
 /*
+ * Exported version of begin_remote_xact().
+ *
+ * This can be called for connections on which begin_remote_xact() has started
+ * a remote transaction.
+ */
+void
+pgfdw_begin_remote_xact(ConnCacheEntry *entry)
+{
+	Assert(entry);
+	Assert(entry->xact_depth > 0);
+	begin_remote_xact(entry);
+}
+
+/*
  * Submit a query and wait for the result.
  *
  * Since we don't use non-blocking mode, this can't process interrupts while
@@ -1076,6 +1091,13 @@ pgfdw_exec_query(PGconn *conn, const char *query, PgFdwConnState *state)
 	/* First, process a pending asynchronous request, if any. */
 	if (state && state->pendingAreq)
 		process_pending_request(state->pendingAreq);
+
+	/*
+	 * Second, synchronize the local/remote transactions.  Note that we need
+	 * to do this because this function can be called from open cursors.
+	 */
+	if (state)
+		pgfdw_begin_remote_xact(state->entry);
 
 	if (!PQsendQuery(conn, query))
 		return NULL;
@@ -1179,6 +1201,16 @@ pgfdw_xact_callback(XactEvent event, void *arg)
 	ConnCacheEntry *entry;
 	List	   *pending_entries = NIL;
 	List	   *cancel_requested = NIL;
+
+	/*
+	 * If we are called for post-commit cleanup, all we need to do is clean up
+	 * foreign scans.
+	 */
+	if (event == XACT_EVENT_PARALLEL_COMMIT || event == XACT_EVENT_COMMIT)
+	{
+		AtEOXact_ForeignScan();
+		return;
+	}
 
 	/* Quick exit if no connections were touched in this transaction. */
 	if (!xact_got_connection)
@@ -1320,6 +1352,10 @@ pgfdw_xact_callback(XactEvent event, void *arg)
 
 	/* Likewise for read_only_level */
 	read_only_level = 0;
+
+	/* If we are called for abort cleanup, clean up foreign scans as well */
+	if (event == XACT_EVENT_PARALLEL_ABORT || event == XACT_EVENT_ABORT)
+		AtEOXact_ForeignScan();
 }
 
 /*
@@ -1335,8 +1371,9 @@ pgfdw_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 	List	   *pending_entries = NIL;
 	List	   *cancel_requested = NIL;
 
-	/* Nothing to do at subxact start, nor after commit. */
+	/* Nothing to do at subxact start. */
 	if (!(event == SUBXACT_EVENT_PRE_COMMIT_SUB ||
+		  event == SUBXACT_EVENT_COMMIT_SUB ||
 		  event == SUBXACT_EVENT_ABORT_SUB))
 		return;
 
@@ -1344,11 +1381,22 @@ pgfdw_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 	if (!xact_got_connection)
 		return;
 
+	curlevel = GetCurrentTransactionNestLevel();
+
+	/*
+	 * If we are called for post-subcommit cleanup, all we need to do is clean
+	 * up foreign scans.
+	 */
+	if (event == SUBXACT_EVENT_COMMIT_SUB)
+	{
+		AtEOSubXact_ForeignScan(curlevel, true);
+		return;
+	}
+
 	/*
 	 * Scan all connection cache entries to find open remote subtransactions
 	 * of the current level, and close them.
 	 */
-	curlevel = GetCurrentTransactionNestLevel();
 	hash_seq_init(&scan, ConnectionHash);
 	while ((entry = (ConnCacheEntry *) hash_seq_search(&scan)))
 	{
@@ -1422,6 +1470,10 @@ pgfdw_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
 	/* If in read_only_level, reset it */
 	if (curlevel == read_only_level)
 		read_only_level = 0;
+
+	/* If we are called for subabort cleanup, clean up foreign scans as well */
+	if (event == SUBXACT_EVENT_ABORT_SUB)
+		AtEOSubXact_ForeignScan(curlevel, false);
 }
 
 /*
@@ -1929,10 +1981,10 @@ pgfdw_abort_cleanup(ConnCacheEntry *entry, bool toplevel)
 	 * If pendingAreq of the per-connection state is not NULL, it means that
 	 * an asynchronous fetch begun by fetch_more_data_begin() was not done
 	 * successfully and thus the per-connection state was not reset in
-	 * fetch_more_data(); in that case reset the per-connection state here.
+	 * fetch_more_data(); in that case reset pendingAreq here.
 	 */
 	if (entry->state.pendingAreq)
-		memset(&entry->state, 0, sizeof(entry->state));
+		entry->state.pendingAreq = NULL;
 
 	/* Disarm changing_xact_state if it all worked */
 	entry->changing_xact_state = false;
@@ -2221,9 +2273,9 @@ pgfdw_finish_abort_cleanup(List *pending_entries, List *cancel_requested,
 			entry->have_error = false;
 		}
 
-		/* Reset the per-connection state if needed */
+		/* Reset pendingAreq here if any */
 		if (entry->state.pendingAreq)
-			memset(&entry->state, 0, sizeof(entry->state));
+			entry->state.pendingAreq = NULL;
 
 		/* We're done with this entry; unset the changing_xact_state flag */
 		entry->changing_xact_state = false;
@@ -2266,9 +2318,9 @@ pgfdw_finish_abort_cleanup(List *pending_entries, List *cancel_requested,
 		entry->have_prep_stmt = false;
 		entry->have_error = false;
 
-		/* Reset the per-connection state if needed */
+		/* Reset pendingAreq here if any */
 		if (entry->state.pendingAreq)
-			memset(&entry->state, 0, sizeof(entry->state));
+			entry->state.pendingAreq = NULL;
 
 		/* We're done with this entry; unset the changing_xact_state flag */
 		entry->changing_xact_state = false;

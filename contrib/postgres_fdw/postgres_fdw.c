@@ -17,6 +17,7 @@
 #include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/table.h"
+#include "access/xact.h"
 #include "catalog/pg_opfamily.h"
 #include "commands/defrem.h"
 #include "commands/explain_format.h"
@@ -184,6 +185,10 @@ typedef struct PgFdwScanState
 	PgFdwConnState *conn_state; /* extra per-connection state */
 	unsigned int cursor_number; /* quasi-unique ID for my cursor */
 	bool		cursor_exists;	/* have we created the cursor? */
+	int			cursor_level;	/* nesting level of the (sub)transaction in
+								 * which the remote cursor was declared, which
+								 * is also the depth of the remote savepoint
+								 * holding it; 0 if no cursor exists */
 	int			numParams;		/* number of parameters passed to query */
 	FmgrInfo   *param_flinfo;	/* output conversion functions for them */
 	List	   *param_exprs;	/* executable expressions for param values */
@@ -206,7 +211,45 @@ typedef struct PgFdwScanState
 	MemoryContext temp_cxt;		/* context for per-tuple temporary data */
 
 	int			fetch_size;		/* number of tuples per fetch */
+
+	bool		cursor_lost;	/* true if the remote cursor was removed by a
+								 * rolled-back savepoint; the tuples already
+								 * fetched are still usable, but no more can
+								 * be fetched; see AtEOSubXact_ForeignScan */
 } PgFdwScanState;
+
+/*
+ * Registry of the foreign scans that are currently open in this backend.
+ *
+ * A remote cursor is declared inside the remote savepoint that matches the
+ * local (sub)transaction in which the first FETCH happens.  If that local
+ * subtransaction is rolled back, the remote cursor is destroyed along with
+ * its remote savepoint, but the local scan, which may well belong to an
+ * outer (sub)transaction (e.g., a cursor opened before the savepoint), does
+ * not go away and would keep using a cursor that no longer exists.
+ *
+ * The subtransaction callbacks (see pgfdw_subxact_callback) are the only
+ * place where we learn about this, but they have no way to reach the scan
+ * nodes of the executor, so each scan registers itself here.  On
+ * subtransaction commit, AtEOSubXact_ForeignScan hands the cursors declared
+ * in the subtransaction over to its parent, mirroring the remote RELEASE; on
+ * abort, it marks them as lost.
+ *
+ * Entries point into executor memory, so they must never outlive the scan
+ * node.  Normally postgresEndForeignScan removes the entry, but the executor
+ * does not call EndForeignScan for a scan whose portal was marked failed by
+ * an aborted subtransaction, e.g., when an error occurred while the scan was
+ * active.  To cover such cases, every scan also registers a callback on its
+ * memory context that removes the entry (see ForeignScanContextCallback).
+ *
+ * Initialized on first use.
+ */
+typedef struct ForeignScanEntry
+{
+	ForeignScanState *fs_node;	/* hash key */
+} ForeignScanEntry;
+
+static HTAB *ForeignScanHash = NULL;
 
 /*
  * Execution state of a foreign insert/update/delete operation.
@@ -538,6 +581,10 @@ static void create_cursor(ForeignScanState *node);
 static void fetch_more_data(ForeignScanState *node);
 static void close_cursor(PGconn *conn, unsigned int cursor_number,
 						 PgFdwConnState *conn_state);
+static void ForeignScanHashInsert(ForeignScanState *node);
+static void ForeignScanHashDelete(ForeignScanState *node);
+static void ForeignScanContextCallback(void *arg);
+static void check_cursor_not_lost(PgFdwScanState *fsstate);
 static PgFdwModifyState *create_foreign_modify(EState *estate,
 											   RangeTblEntry *rte,
 											   ResultRelInfo *resultRelInfo,
@@ -1701,6 +1748,7 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	ForeignScan *fsplan = (ForeignScan *) node->ss.ps.plan;
 	EState	   *estate = node->ss.ps.state;
 	PgFdwScanState *fsstate;
+	MemoryContextCallback *scan_cb;
 	RangeTblEntry *rte;
 	Oid			userid;
 	ForeignTable *table;
@@ -1760,6 +1808,7 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	/* Assign a unique ID for my cursor */
 	fsstate->cursor_number = GetCursorNumber(fsstate->conn);
 	fsstate->cursor_exists = false;
+	fsstate->cursor_level = 0;
 
 	/* Get private info created by planner functions. */
 	fsstate->query = strVal(list_nth(fsplan->fdw_private,
@@ -1820,6 +1869,20 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 
 	/* Set the async-capable flag */
 	fsstate->async_capable = node->ss.ps.async_capable;
+
+	fsstate->cursor_lost = false;
+
+	/*
+	 * Register the scan, and make sure that it is unregistered even if
+	 * EndForeignScan is never called for it.  The callback is allocated in
+	 * the context it is registered on, so that it can't outlive it.
+	 */
+	ForeignScanHashInsert(node);
+	scan_cb = (MemoryContextCallback *)
+		MemoryContextAlloc(estate->es_query_cxt, sizeof(MemoryContextCallback));
+	scan_cb->func = ForeignScanContextCallback;
+	scan_cb->arg = node;
+	MemoryContextRegisterResetCallback(estate->es_query_cxt, scan_cb);
 }
 
 /*
@@ -1891,6 +1954,30 @@ postgresReScanForeignScan(ForeignScanState *node)
 		   fsstate->conn_state->pendingAreq->requestee != (PlanState *) node);
 
 	/*
+	 * If the remote cursor is gone, there is nothing to close or rewind on
+	 * the remote side.  If we can't just rescan what we already have in
+	 * memory, forget the cursor, so that a fresh one is created at the next
+	 * fetch.
+	 */
+	if (fsstate->cursor_lost)
+	{
+		if (node->ss.ps.chgParam == NULL &&
+			fsstate->fetch_ct_2 <= 1 && fsstate->eof_reached)
+			fsstate->next_tuple = 0;
+		else
+		{
+			fsstate->cursor_exists = false;
+			fsstate->cursor_lost = false;
+			fsstate->tuples = NULL;
+			fsstate->num_tuples = 0;
+			fsstate->next_tuple = 0;
+			fsstate->fetch_ct_2 = 0;
+			fsstate->eof_reached = false;
+		}
+		return;
+	}
+
+	/*
 	 * If any internal parameters affecting this node have changed, we'd
 	 * better destroy and recreate the cursor.  Otherwise, if the remote
 	 * server is v14 or older, rewinding it should be good enough; if not,
@@ -1902,6 +1989,7 @@ postgresReScanForeignScan(ForeignScanState *node)
 	if (node->ss.ps.chgParam != NULL)
 	{
 		fsstate->cursor_exists = false;
+		fsstate->cursor_level = 0;
 		snprintf(sql, sizeof(sql), "CLOSE c%u",
 				 fsstate->cursor_number);
 	}
@@ -1913,6 +2001,7 @@ postgresReScanForeignScan(ForeignScanState *node)
 		else
 		{
 			fsstate->cursor_exists = false;
+			fsstate->cursor_level = 0;
 			snprintf(sql, sizeof(sql), "CLOSE c%u",
 					 fsstate->cursor_number);
 		}
@@ -1950,14 +2039,19 @@ postgresEndForeignScan(ForeignScanState *node)
 	if (fsstate == NULL)
 		return;
 
-	/* Close the cursor if open, to prevent accumulation of cursors */
-	if (fsstate->cursor_exists)
+	/*
+	 * Close the cursor if open, to prevent accumulation of cursors; but not
+	 * if it's already gone.
+	 */
+	if (fsstate->cursor_exists && !fsstate->cursor_lost)
 		close_cursor(fsstate->conn, fsstate->cursor_number,
 					 fsstate->conn_state);
 
 	/* Release remote connection */
 	ReleaseConnection(fsstate->conn);
 	fsstate->conn = NULL;
+
+	ForeignScanHashDelete(node);
 
 	/* MemoryContexts will be deleted automatically. */
 }
@@ -4057,6 +4151,12 @@ create_cursor(ForeignScanState *node)
 		process_pending_request(fsstate->conn_state->pendingAreq);
 
 	/*
+	 * Second, synchronize the local/remote transactions.  Note that we need
+	 * to do this because this function can be called from open cursors.
+	 */
+	pgfdw_begin_remote_xact(fsstate->conn_state->entry);
+
+	/*
 	 * Construct array of query parameter values in text format.  We do the
 	 * conversions in the short-lived per-tuple context, so as not to cause a
 	 * memory leak over repeated scans.
@@ -4101,6 +4201,8 @@ create_cursor(ForeignScanState *node)
 
 	/* Mark the cursor as created, and show no tuples have been retrieved */
 	fsstate->cursor_exists = true;
+	fsstate->cursor_lost = false;
+	fsstate->cursor_level = GetCurrentTransactionNestLevel();
 	fsstate->tuples = NULL;
 	fsstate->num_tuples = 0;
 	fsstate->next_tuple = 0;
@@ -4125,6 +4227,12 @@ fetch_more_data(ForeignScanState *node)
 	MemoryContext oldcontext;
 
 	/*
+	 * Don't throw away the previous batch if we can't fetch another one.
+	 */
+	if (!fsstate->async_capable)
+		check_cursor_not_lost(fsstate);
+
+	/*
 	 * We'll store the tuples in the batch_cxt.  First, flush the previous
 	 * batch.
 	 */
@@ -4145,7 +4253,7 @@ fetch_more_data(ForeignScanState *node)
 		if (PQresultStatus(res) != PGRES_TUPLES_OK)
 			pgfdw_report_error(res, conn, fsstate->query);
 
-		/* Reset per-connection state */
+		/* Reset the pending asynchronous request */
 		fsstate->conn_state->pendingAreq = NULL;
 	}
 	else
@@ -4266,6 +4374,165 @@ close_cursor(PGconn *conn, unsigned int cursor_number,
 	if (PQresultStatus(res) != PGRES_COMMAND_OK)
 		pgfdw_report_error(res, conn, sql);
 	PQclear(res);
+}
+
+/*
+ * Complain if the remote cursor of a scan was removed by rolling back a
+ * savepoint, in which case no more tuples can be fetched for the scan.
+ *
+ * Note that fsstate->rel is NULL if the scan is for a join or an upper
+ * relation pushed down to the remote server.
+ */
+static void
+check_cursor_not_lost(PgFdwScanState *fsstate)
+{
+	if (!fsstate->cursor_lost)
+		return;
+
+	if (fsstate->rel != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot fetch more rows from foreign table \"%s\"",
+						RelationGetRelationName(fsstate->rel)),
+				 errdetail("The remote cursor was removed by rolling back the subtransaction in which it was created.")));
+	else
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot fetch more rows from this foreign scan"),
+				 errdetail("The remote cursor was removed by rolling back the subtransaction in which it was created.")));
+}
+
+/*
+ * Add a ForeignScan node to the ForeignScanHash table
+ */
+static void
+ForeignScanHashInsert(ForeignScanState *node)
+{
+	ForeignScanEntry *entry;
+	bool		found;
+
+	/* First time through, initialize foreign scan hashtable */
+	if (ForeignScanHash == NULL)
+	{
+		HASHCTL		ctl;
+
+		ctl.keysize = sizeof(ForeignScanState *);
+		ctl.entrysize = sizeof(ForeignScanEntry);
+		ForeignScanHash = hash_create("postgres_fdw ForeignScan nodes",
+									  256L,
+									  &ctl,
+									  HASH_ELEM | HASH_BLOBS);
+	}
+
+	entry = (ForeignScanEntry *) hash_search(ForeignScanHash,
+											 &node,
+											 HASH_ENTER,
+											 &found);
+	if (found)
+		elog(ERROR, "duplicate ForeignScan node");
+	entry->fs_node = node;
+}
+
+/*
+ * Remove a ForeignScan node from the ForeignScanHash table, if it is there
+ */
+static void
+ForeignScanHashDelete(ForeignScanState *node)
+{
+	if (ForeignScanHash == NULL)
+		return;
+
+	(void) hash_search(ForeignScanHash, &node, HASH_REMOVE, NULL);
+}
+
+/*
+ * Memory context callback to unregister a foreign scan whose executor memory
+ * is being freed.  This must not throw errors.
+ */
+static void
+ForeignScanContextCallback(void *arg)
+{
+	ForeignScanHashDelete((ForeignScanState *) arg);
+}
+
+/*
+ * Clean up foreign scans after a transaction commit/abort
+ */
+void
+AtEOXact_ForeignScan(void)
+{
+	HASH_SEQ_STATUS scan;
+	ForeignScanEntry *entry;
+
+	if (ForeignScanHash == NULL)
+		return;
+
+	hash_seq_init(&scan, ForeignScanHash);
+	while ((entry = hash_seq_search(&scan)) != NULL)
+	{
+		ForeignScanState *node = entry->fs_node;
+
+		/*
+		 * Scans of portals that were marked failed may still be around at
+		 * this point; their memory is freed later, at which point the context
+		 * callback finds nothing to remove.
+		 */
+		ForeignScanHashDelete(node);
+	}
+}
+
+/*
+ * Clean up foreign scans after a subtransaction subcommit/subabort
+ *
+ * "level" is the nesting level of the subtransaction that ended.
+ *
+ * We only care about the remote cursors that were declared in that
+ * subtransaction, i.e., those whose cursor_level is at least "level" (it can't
+ * be deeper, since deeper subtransactions have already ended and handed their
+ * cursors over to this one).
+ *
+ * On subcommit, the remote savepoint of that level is released, so such
+ * cursors now belong to the parent level.
+ *
+ * On subabort, the remote savepoint is rolled back, so such cursors are gone
+ * on the remote server.  Mark them as lost.  The tuples the scan has already
+ * fetched remain usable, but trying to fetch more fails with a clear error
+ * (see check_cursor_not_lost), rather than with a remote "cursor does not
+ * exist" error at some later point, such as when the cursor is closed.  Note
+ * that we needn't tell apart the scans created in the aborted subtransaction,
+ * which are going away anyway; marking their cursors is harmless.
+ */
+void
+AtEOSubXact_ForeignScan(int level, bool is_subcommit)
+{
+	HASH_SEQ_STATUS scan;
+	ForeignScanEntry *entry;
+
+	if (ForeignScanHash == NULL)
+		return;
+
+	hash_seq_init(&scan, ForeignScanHash);
+	while ((entry = hash_seq_search(&scan)) != NULL)
+	{
+		ForeignScanState *node = entry->fs_node;
+		PgFdwScanState *fsstate = (PgFdwScanState *) node->fdw_state;
+
+		/* Skip unless the remote cursor was declared in this subxact */
+		if (!fsstate->cursor_exists || fsstate->cursor_level < level)
+			continue;
+
+		if (is_subcommit)
+		{
+			/* The cursor now belongs to the parent subxact */
+			fsstate->cursor_level = level - 1;
+		}
+		else
+		{
+			/* The cursor is gone; remember that */
+			fsstate->cursor_lost = true;
+			fsstate->cursor_level = 0;
+		}
+	}
 }
 
 /*
@@ -4392,6 +4659,9 @@ create_foreign_modify(EState *estate,
  *		result if any.  (This is the shared guts of postgresExecForeignInsert,
  *		postgresExecForeignBatchInsert, postgresExecForeignUpdate, and
  *		postgresExecForeignDelete.)
+ *
+ * Note: this function is never called from open cursors, thus no need to
+ * synchronize the local/remote transactions.
  */
 static TupleTableSlot **
 execute_foreign_modify(EState *estate,
@@ -4830,6 +5100,9 @@ rebuild_fdw_scan_tlist(ForeignScan *fscan, List *tlist)
 
 /*
  * Execute a direct UPDATE/DELETE statement.
+ *
+ * Note: this function is never called from open cursors, thus no need to
+ * synchronize the local/remote transactions.
  */
 static void
 execute_dml_stmt(ForeignScanState *node)
@@ -8810,9 +9083,16 @@ fetch_more_data_begin(AsyncRequest *areq)
 
 	Assert(!fsstate->conn_state->pendingAreq);
 
-	/* Create the cursor synchronously. */
+	check_cursor_not_lost(fsstate);
+
+	/*
+	 * Create the cursor synchronously if not already done.  Otherwise,
+	 * synchronize the local/remote transactions before the data fetch.
+	 */
 	if (!fsstate->cursor_exists)
 		create_cursor(node);
+	else
+		pgfdw_begin_remote_xact(fsstate->conn_state->entry);
 
 	/* We will send this query, but not wait for the response. */
 	snprintf(sql, sizeof(sql), "FETCH %d FROM c%u",
