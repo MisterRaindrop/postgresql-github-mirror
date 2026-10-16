@@ -150,7 +150,8 @@ static bool alter_sub_conflict_log_dest(Subscription *sub,
 										ConflictLogDest newlogdest,
 										Oid *conflicttablerelid);
 static void drop_sub_conflict_log_table(Oid subid, char *subname,
-										Oid subconflictlogrelid);
+										Oid subconflictlogrelid,
+										DropBehavior behavior);
 
 /*
  * Common option parsing function for CREATE and ALTER SUBSCRIPTION commands.
@@ -1614,7 +1615,7 @@ alter_sub_conflict_log_dest(Subscription *sub, ConflictLogDest oldlogdest,
 		if (!want_table)
 		{
 			drop_sub_conflict_log_table(sub->oid, sub->name,
-										sub->conflictlogrelid);
+										sub->conflictlogrelid, DROP_RESTRICT);
 			update_relid = true;
 		}
 	}
@@ -2553,9 +2554,10 @@ construct_subserver_conninfo(Oid subserver, Oid subowner, char **err)
  * Drop subscription's conflict log table
  *
  * The conflict log table is registered as an internal dependency of the
- * subscription. This function removes the dependency by performing a
- * cascading deletion on the subscription object, which in turn drops the
- * associated conflict log table.
+ * subscription. This function removes the dependency by deleting the
+ * dependents of the subscription object, which in turn drops the associated
+ * conflict log table.  With DROP_RESTRICT, this fails if other objects
+ * depend on the conflict log table.
  *
  * This is used to clean up conflict log tables that are no longer required,
  * preventing accumulation of stale or orphaned relations.
@@ -2565,7 +2567,8 @@ construct_subserver_conninfo(Oid subserver, Oid subowner, char **err)
  * mechanism.
  */
 static void
-drop_sub_conflict_log_table(Oid subid, char *subname, Oid subconflictlogrelid)
+drop_sub_conflict_log_table(Oid subid, char *subname, Oid subconflictlogrelid,
+							DropBehavior behavior)
 {
 	/* Drop any dependent conflict log table */
 	if (OidIsValid(subconflictlogrelid))
@@ -2583,7 +2586,7 @@ drop_sub_conflict_log_table(Oid subid, char *subname, Oid subconflictlogrelid)
 		 * conflict log table is deleted while the subscription remains.
 		 */
 		ObjectAddressSet(object, SubscriptionRelationId, subid);
-		performDeletion(&object, DROP_CASCADE,
+		performDeletion(&object, behavior,
 						PERFORM_DELETION_INTERNAL |
 						PERFORM_DELETION_SKIP_ORIGINAL);
 
@@ -2703,6 +2706,14 @@ DropSubscription(DropSubscriptionStmt *stmt, bool isTopLevel)
 	if (slotname)
 		PreventInTransactionBlock(isTopLevel, "DROP SUBSCRIPTION");
 
+	/*
+	 * Drop the conflict log table first.  With RESTRICT this fails if other
+	 * objects depend on it, so do it before any non-transactional cleanup
+	 * below.
+	 */
+	drop_sub_conflict_log_table(subid, subname, subconflictlogrelid,
+								stmt->behavior);
+
 	ObjectAddressSet(myself, SubscriptionRelationId, subid);
 	EventTriggerSQLDropAddObject(&myself, true, true);
 
@@ -2776,9 +2787,6 @@ DropSubscription(DropSubscriptionStmt *stmt, bool isTopLevel)
 										   sizeof(originname));
 		replorigin_drop_by_name(originname, true, false);
 	}
-
-	/* Drop subscription's conflict log table */
-	drop_sub_conflict_log_table(subid, subname, subconflictlogrelid);
 
 	/* Clean up dependencies */
 	deleteDependencyRecordsFor(SubscriptionRelationId, subid, false);
