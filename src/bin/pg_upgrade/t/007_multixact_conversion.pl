@@ -440,4 +440,63 @@ SKIP:
 	upgrade_and_compare($tag, $old, $new);
 }
 
+# Multixid wraparound at the last multixid: The newest multixid is
+# 0xFFFFFFFF, so the old cluster's next multixid is 0.  That must not
+# end up as datminmxid or relminmxid in the new cluster.
+SKIP:
+{
+	skip
+	  "skipping mxid wraparound tests because upgrading from the old version does not require conversion"
+	  if ($old_version >= '19devel');
+
+	my $tag = 'last_mxid';
+	my $old =
+	  PostgreSQL::Test::Cluster->new("${tag}_oldnode",
+		install_path => $ENV{oldinstall});
+	my $new = PostgreSQL::Test::Cluster->new("${tag}_newnode");
+
+	$old->init(extra => ['-k']);
+
+	reset_mxid_mxoffset_pre_v19($old, 0xFFFFFFFF, 0x10000);
+
+	# Create one multixid with two members, a locker and an updater
+	$old->start;
+	$old->safe_psql(
+		'postgres', qq[
+		CREATE TABLE mxofftest (id INT PRIMARY KEY, n_updated INT)
+		  WITH (AUTOVACUUM_ENABLED=FALSE);
+		INSERT INTO mxofftest SELECT G, 0 FROM GENERATE_SERIES(1, 2) G;
+	]);
+	my $locker =
+	  $new->background_psql('', connstr => $old->connstr('postgres'));
+	$locker->query_safe("BEGIN");
+	$locker->query_safe("SELECT * FROM mxofftest WHERE id = 1 FOR KEY SHARE");
+	$old->safe_psql('postgres',
+		"UPDATE mxofftest SET n_updated = n_updated + 1 WHERE id = 1");
+	$locker->query_safe("COMMIT");
+	$locker->quit;
+	$old->stop;
+
+	my (undef, $next_mxid, undef) = read_multixid_fields($old);
+	is($next_mxid, 0, "next multixid wrapped around to 0 in old cluster");
+
+	$new->init;
+	upgrade_and_compare($tag, $old, $new);
+
+	$new->start;
+	is( $new->safe_psql(
+			'postgres',
+			"SELECT count(*) FROM pg_database WHERE datminmxid = '0'"),
+		'0',
+		'no database has an invalid datminmxid after upgrade');
+	is( $new->safe_psql(
+			'postgres',
+			"SELECT count(*) FROM pg_class WHERE relminmxid = '0' AND relkind IN ('r', 'm', 't')"
+		),
+		'0',
+		'no table has an invalid relminmxid after upgrade');
+	$new->safe_psql('postgres', 'VACUUM');
+	$new->stop;
+}
+
 done_testing();
