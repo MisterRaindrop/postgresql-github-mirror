@@ -2348,7 +2348,9 @@ ExecuteCallStmt(CallStmt *stmt, ParamListInfo params, bool atomic, DestReceiver 
 		TupleTableSlot *slot;
 
 		if (fcinfo->isnull)
-			elog(ERROR, "procedure returned null record");
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+					 errmsg("procedure returned null record")));
 
 		/*
 		 * Ensure there's an active snapshot whilst we execute whatever's

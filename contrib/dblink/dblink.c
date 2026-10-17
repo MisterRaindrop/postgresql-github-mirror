@@ -1105,7 +1105,9 @@ storeQueryResult(storeInfo *sinfo, PGconn *conn, const char *sql)
 	PGresult   *res;
 
 	if (!PQsendQuery(conn, sql))
-		elog(ERROR, "could not send query: %s", pchomp(PQerrorMessage(conn)));
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("could not send query: %s", pchomp(PQerrorMessage(conn)))));
 
 	if (!PQsetSingleRowMode(conn))	/* shouldn't fail */
 		elog(ERROR, "failed to set single-row mode for dblink query");

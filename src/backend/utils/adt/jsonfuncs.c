@@ -5611,7 +5611,9 @@ parse_jsonb_index_flags(Jsonb *jb)
 
 	/* expect end of array now */
 	if (type != WJB_END_ARRAY)
-		elog(ERROR, "unexpected end of flag array");
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unexpected end of flag array")));
 
 	/* get final WJB_DONE and free iterator */
 	type = JsonbIteratorNext(&it, &v, false);
