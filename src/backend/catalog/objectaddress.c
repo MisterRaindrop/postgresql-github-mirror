@@ -2872,7 +2872,8 @@ get_object_property_data(Oid class_id)
 	}
 
 	ereport(ERROR,
-			(errmsg_internal("unrecognized class ID: %u", class_id)));
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("unrecognized class ID: %u", class_id)));
 
 	return NULL;				/* keep MSC compiler happy */
 }
@@ -4940,7 +4941,9 @@ getObjectTypeDescription(const ObjectAddress *object, bool missing_ok)
 			break;
 
 		default:
-			elog(ERROR, "unsupported object class: %u", object->classId);
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("unsupported object class: %u", object->classId)));
 	}
 
 	/* the result can never be empty */

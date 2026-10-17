@@ -342,8 +342,10 @@ bloom_init(int ndistinct, double false_positive_rate)
 	 * filters that are small individually, but too large when combined.
 	 */
 	if (nbytes > BloomMaxFilterSize)
-		elog(ERROR, "the bloom filter is too large (%d > %zu)", nbytes,
-			 BloomMaxFilterSize);
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("the bloom filter is too large (%d > %zu)", nbytes,
+						BloomMaxFilterSize)));
 
 	/*
 	 * We allocate the whole filter. Most of it is going to be 0 bits, so the
