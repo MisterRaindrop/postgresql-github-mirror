@@ -1176,6 +1176,10 @@ gen_partprune_steps_internal(GeneratePruningStepsContext *context,
 			PartClauseInfo *pc = NULL;
 			List	   *clause_steps = NIL;
 
+			/* The clause side is stripped of relabeling, so do it here too */
+			while (IsA(partkey, RelabelType))
+				partkey = ((RelabelType *) partkey)->arg;
+
 			switch (match_clause_to_partition_key(context,
 												  clause, partkey, i,
 												  &clause_is_not_null,

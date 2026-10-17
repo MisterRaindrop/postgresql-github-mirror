@@ -1558,3 +1558,15 @@ select * from (select a, b from phv_boolpart) t
   group by grouping sets (a, b);
 
 drop table phv_boolpart;
+
+-- Partition key whose typmod changes when an SQL function is inlined
+create function relabel_part_f(numeric) returns numeric
+  language sql immutable as 'select $1';
+create table relabel_part (a numeric(10), b numeric(10))
+  partition by list ((coalesce(relabel_part_f(a), b)));
+create table relabel_part1 partition of relabel_part for values in (1);
+create table relabel_part2 partition of relabel_part for values in (2);
+explain (costs off)
+select * from relabel_part where coalesce(relabel_part_f(a), b) = 1;
+drop table relabel_part;
+drop function relabel_part_f(numeric);
