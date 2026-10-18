@@ -2555,6 +2555,8 @@ exec_command_password(PsqlScanState scan_state, bool active_branch)
 		char	   *pw2 = NULL;
 		PQExpBufferData buf;
 		PromptInterruptContext prompt_ctx;
+		sigjmp_buf	local_sigjmp_buf;
+		sigjmp_buf *save_exception_stack = PG_exception_stack;
 
 		if (user == NULL)
 		{
@@ -2570,16 +2572,18 @@ exec_command_password(PsqlScanState scan_state, bool active_branch)
 		}
 
 		/* Set up to let SIGINT cancel simple_prompt_extended() */
-		prompt_ctx.jmpbuf = sigint_interrupt_jmp;
+		prompt_ctx.jmpbuf = &local_sigjmp_buf;
 		prompt_ctx.enabled = &sigint_interrupt_enabled;
 		prompt_ctx.canceled = false;
 
 		initPQExpBuffer(&buf);
 		printfPQExpBuffer(&buf, _("Enter new password for user \"%s\": "), user);
 
+		PG_exception_stack = &local_sigjmp_buf;
 		pw1 = simple_prompt_extended(buf.data, false, &prompt_ctx);
 		if (!prompt_ctx.canceled)
 			pw2 = simple_prompt_extended("Enter it again: ", false, &prompt_ctx);
+		PG_exception_stack = save_exception_stack;
 
 		if (prompt_ctx.canceled)
 		{
@@ -2643,9 +2647,11 @@ exec_command_prompt(PsqlScanState scan_state, bool active_branch,
 		{
 			char	   *result;
 			PromptInterruptContext prompt_ctx;
+			sigjmp_buf	local_sigjmp_buf;
+			sigjmp_buf *save_exception_stack = PG_exception_stack;
 
 			/* Set up to let SIGINT cancel simple_prompt_extended() */
-			prompt_ctx.jmpbuf = sigint_interrupt_jmp;
+			prompt_ctx.jmpbuf = &local_sigjmp_buf;
 			prompt_ctx.enabled = &sigint_interrupt_enabled;
 			prompt_ctx.canceled = false;
 
@@ -2659,7 +2665,9 @@ exec_command_prompt(PsqlScanState scan_state, bool active_branch,
 
 			if (!pset.inputfile)
 			{
+				PG_exception_stack = &local_sigjmp_buf;
 				result = simple_prompt_extended(prompt_text, true, &prompt_ctx);
+				PG_exception_stack = save_exception_stack;
 			}
 			else
 			{
@@ -3880,12 +3888,15 @@ prompt_for_password(const char *username, bool *canceled)
 {
 	char	   *result;
 	PromptInterruptContext prompt_ctx;
+	sigjmp_buf	local_sigjmp_buf;
+	sigjmp_buf *save_exception_stack = PG_exception_stack;
 
 	/* Set up to let SIGINT cancel simple_prompt_extended() */
-	prompt_ctx.jmpbuf = sigint_interrupt_jmp;
+	prompt_ctx.jmpbuf = &local_sigjmp_buf;
 	prompt_ctx.enabled = &sigint_interrupt_enabled;
 	prompt_ctx.canceled = false;
 
+	PG_exception_stack = &local_sigjmp_buf;
 	if (username == NULL || username[0] == '\0')
 		result = simple_prompt_extended("Password: ", false, &prompt_ctx);
 	else
@@ -3896,6 +3907,7 @@ prompt_for_password(const char *username, bool *canceled)
 		result = simple_prompt_extended(prompt_text, false, &prompt_ctx);
 		pfree(prompt_text);
 	}
+	PG_exception_stack = save_exception_stack;
 
 	if (canceled)
 		*canceled = prompt_ctx.canceled;
