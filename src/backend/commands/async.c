@@ -2419,6 +2419,18 @@ SignalBackends(void)
 void
 AtAbort_Notify(void)
 {
+	/*
+	 * If a notify read failed, clear our isAdvancing flag, else
+	 * SignalBackends() would never advance or wake us again.  Only we set it,
+	 * so it is safe to check without the lock.
+	 */
+	if (amRegisteredListener && QUEUE_BACKEND_IS_ADVANCING(MyProcNumber))
+	{
+		LWLockAcquire(NotifyQueueLock, LW_SHARED);
+		QUEUE_BACKEND_IS_ADVANCING(MyProcNumber) = false;
+		LWLockRelease(NotifyQueueLock);
+	}
+
 	/* Revert staged listen/unlisten changes */
 	ApplyPendingListenActions(false);
 
