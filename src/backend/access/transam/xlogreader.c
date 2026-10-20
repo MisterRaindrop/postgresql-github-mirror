@@ -1750,7 +1750,7 @@ DecodeXLogRecord(XLogReaderState *state,
 	char	   *ptr;
 	char	   *out;
 	uint32		remaining;
-	uint32		datatotal;
+	uint64		datatotal;
 	RelFileLocator *rlocator = NULL;
 	uint8		block_id;
 
