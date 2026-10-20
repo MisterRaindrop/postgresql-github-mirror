@@ -772,11 +772,6 @@ static const struct
 		"America/Buenos_Aires"
 	},
 	{
-		/* (UTC+04:00) Baku, Tbilisi, Yerevan */
-		"Armenian Standard Time", "Armenian Daylight Time",
-		"Asia/Yerevan"
-	},
-	{
 		/* (UTC+04:00) Astrakhan, Ulyanovsk */
 		"Astrakhan Standard Time", "Astrakhan Daylight Time",
 		"Europe/Astrakhan"
@@ -830,11 +825,6 @@ static const struct
 		/* (UTC+11:00) Bougainville Island */
 		"Bougainville Standard Time", "Bougainville Daylight Time",
 		"Pacific/Bougainville"
-	},
-	{
-		/* (UTC-01:00) Cabo Verde Is. */
-		"Cabo Verde Standard Time", "Cabo Verde Daylight Time",
-		"Atlantic/Cape_Verde"
 	},
 	{
 		/* (UTC-06:00) Saskatchewan */
@@ -905,11 +895,6 @@ static const struct
 		/* (UTC+08:00) Beijing, Chongqing, Hong Kong, Urumqi */
 		"China Standard Time", "China Daylight Time",
 		"Asia/Shanghai"
-	},
-	{
-		/* (UTC) Coordinated Universal Time */
-		"Coordinated Universal Time", "Coordinated Universal Time",
-		"UTC"
 	},
 	{
 		/* (UTC-05:00) Havana */
@@ -1034,11 +1019,6 @@ static const struct
 		"Asia/Jerusalem"
 	},
 	{
-		/* (UTC+02:00) Jerusalem (old spelling of zone name) */
-		"Jerusalem Standard Time", "Jerusalem Daylight Time",
-		"Asia/Jerusalem"
-	},
-	{
 		/* (UTC+02:00) Amman */
 		"Jordan Standard Time", "Jordan Daylight Time",
 		"Asia/Amman"
@@ -1047,11 +1027,6 @@ static const struct
 		/* (UTC+02:00) Kaliningrad */
 		"Kaliningrad Standard Time", "Kaliningrad Daylight Time",
 		"Europe/Kaliningrad"
-	},
-	{
-		/* (UTC+12:00) Petropavlovsk-Kamchatsky - Old */
-		"Kamchatka Standard Time", "Kamchatka Daylight Time",
-		"Asia/Kamchatka"
 	},
 	{
 		/* (UTC+09:00) Seoul */
@@ -1084,11 +1059,6 @@ static const struct
 		"America/Punta_Arenas"
 	},
 	{
-		/* (UTC+08:00) Kuala Lumpur, Singapore */
-		"Malay Peninsula Standard Time", "Malay Peninsula Daylight Time",
-		"Asia/Kuala_Lumpur"
-	},
-	{
 		/* (UTC-09:30) Marquesas Islands */
 		"Marquesas Standard Time", "Marquesas Daylight Time",
 		"Pacific/Marquesas"
@@ -1097,21 +1067,6 @@ static const struct
 		/* (UTC+04:00) Port Louis */
 		"Mauritius Standard Time", "Mauritius Daylight Time",
 		"Indian/Mauritius"
-	},
-	{
-		/* (UTC-06:00) Guadalajara, Mexico City, Monterrey */
-		"Mexico Standard Time", "Mexico Daylight Time",
-		"America/Mexico_City"
-	},
-	{
-		/* (UTC-07:00) Chihuahua, La Paz, Mazatlan */
-		"Mexico Standard Time 2", "Mexico Daylight Time 2",
-		"America/Chihuahua"
-	},
-	{
-		/* (UTC-02:00) Mid-Atlantic - Old */
-		"Mid-Atlantic Standard Time", "Mid-Atlantic Daylight Time",
-		"Atlantic/South_Georgia"
 	},
 	{
 		/* (UTC+02:00) Beirut */
@@ -1189,11 +1144,6 @@ static const struct
 		"Asia/Pyongyang"
 	},
 	{
-		/* (UTC+07:00) Novosibirsk */
-		"Novosibirsk Standard Time", "Novosibirsk Daylight Time",
-		"Asia/Novosibirsk"
-	},
-	{
 		/* (UTC+06:00) Omsk */
 		"Omsk Standard Time", "Omsk Daylight Time",
 		"Asia/Omsk"
@@ -1234,11 +1184,6 @@ static const struct
 		"Europe/Paris"
 	},
 	{
-		/* (UTC+04:00) Izhevsk, Samara */
-		"Russia Time Zone 3", "Russia Time Zone 3",
-		"Europe/Samara"
-	},
-	{
 		/* (UTC+11:00) Chokurdakh */
 		"Russia Time Zone 10", "Russia Time Zone 10",
 		"Asia/Srednekolymsk"
@@ -1249,59 +1194,9 @@ static const struct
 		"Asia/Kamchatka"
 	},
 	{
-		/* (UTC+02:00) Kaliningrad */
-		"Russia TZ 1 Standard Time", "Russia TZ 1 Daylight Time",
-		"Europe/Kaliningrad"
-	},
-	{
-		/* (UTC+03:00) Moscow, St. Petersburg */
-		"Russia TZ 2 Standard Time", "Russia TZ 2 Daylight Time",
-		"Europe/Moscow"
-	},
-	{
 		/* (UTC+04:00) Izhevsk, Samara */
-		"Russia TZ 3 Standard Time", "Russia TZ 3 Daylight Time",
+		"Russia Time Zone 3", "Russia Time Zone 3",
 		"Europe/Samara"
-	},
-	{
-		/* (UTC+05:00) Ekaterinburg */
-		"Russia TZ 4 Standard Time", "Russia TZ 4 Daylight Time",
-		"Asia/Yekaterinburg"
-	},
-	{
-		/* (UTC+06:00) Novosibirsk (RTZ 5) */
-		"Russia TZ 5 Standard Time", "Russia TZ 5 Daylight Time",
-		"Asia/Novosibirsk"
-	},
-	{
-		/* (UTC+07:00) Krasnoyarsk */
-		"Russia TZ 6 Standard Time", "Russia TZ 6 Daylight Time",
-		"Asia/Krasnoyarsk"
-	},
-	{
-		/* (UTC+08:00) Irkutsk */
-		"Russia TZ 7 Standard Time", "Russia TZ 7 Daylight Time",
-		"Asia/Irkutsk"
-	},
-	{
-		/* (UTC+09:00) Yakutsk */
-		"Russia TZ 8 Standard Time", "Russia TZ 8 Daylight Time",
-		"Asia/Yakutsk"
-	},
-	{
-		/* (UTC+10:00) Vladivostok */
-		"Russia TZ 9 Standard Time", "Russia TZ 9 Daylight Time",
-		"Asia/Vladivostok"
-	},
-	{
-		/* (UTC+11:00) Chokurdakh */
-		"Russia TZ 10 Standard Time", "Russia TZ 10 Daylight Time",
-		"Asia/Magadan"
-	},
-	{
-		/* (UTC+12:00) Anadyr, Petropavlovsk-Kamchatsky */
-		"Russia TZ 11 Standard Time", "Russia TZ 11 Daylight Time",
-		"Asia/Anadyr"
 	},
 	{
 		/* (UTC+03:00) Moscow, St. Petersburg */
@@ -1520,11 +1415,6 @@ static const struct
 	},
 	{
 		/* (UTC+02:00) Gaza, Hebron */
-		"West Bank Gaza Standard Time", "West Bank Gaza Daylight Time",
-		"Asia/Gaza"
-	},
-	{
-		/* (UTC+02:00) Gaza, Hebron */
 		"West Bank Standard Time", "West Bank Daylight Time",
 		"Asia/Hebron"
 	},
@@ -1543,6 +1433,128 @@ static const struct
 		"Yukon Standard Time", "Yukon Daylight Time",
 		"America/Whitehorse"
 	},
+
+	/*
+	 * END of CLDR-derived entries
+	 */
+
+	/*
+	 * Obsolete zones, or just obsolete spellings of their names. These are no
+	 * longer derivable from CLDR, but should be kept to support older Windows
+	 * installations.
+	 */
+
+	{
+		/* (UTC+04:00) Baku, Tbilisi, Yerevan */
+		"Armenian Standard Time", "Armenian Daylight Time",
+		"Asia/Yerevan"
+	},
+	{
+		/* (UTC-01:00) Cabo Verde Is. */
+		"Cabo Verde Standard Time", "Cabo Verde Daylight Time",
+		"Atlantic/Cape_Verde"
+	},
+	{
+		/* (UTC) Coordinated Universal Time */
+		"Coordinated Universal Time", "Coordinated Universal Time",
+		"UTC"
+	},
+	{
+		/* (UTC+02:00) Jerusalem */
+		"Jerusalem Standard Time", "Jerusalem Daylight Time",
+		"Asia/Jerusalem"
+	},
+	{
+		/* (UTC+12:00) Petropavlovsk-Kamchatsky */
+		"Kamchatka Standard Time", "Kamchatka Daylight Time",
+		"Asia/Kamchatka"
+	},
+	{
+		/* (UTC+08:00) Kuala Lumpur, Singapore */
+		"Malay Peninsula Standard Time", "Malay Peninsula Daylight Time",
+		"Asia/Kuala_Lumpur"
+	},
+	{
+		/* (UTC-06:00) Guadalajara, Mexico City, Monterrey */
+		"Mexico Standard Time", "Mexico Daylight Time",
+		"America/Mexico_City"
+	},
+	{
+		/* (UTC-07:00) Chihuahua, La Paz, Mazatlan */
+		"Mexico Standard Time 2", "Mexico Daylight Time 2",
+		"America/Chihuahua"
+	},
+	{
+		/* (UTC-02:00) Mid-Atlantic */
+		"Mid-Atlantic Standard Time", "Mid-Atlantic Daylight Time",
+		"Atlantic/South_Georgia"
+	},
+	{
+		/* (UTC+07:00) Novosibirsk */
+		"Novosibirsk Standard Time", "Novosibirsk Daylight Time",
+		"Asia/Novosibirsk"
+	},
+	{
+		/* (UTC+02:00) Kaliningrad */
+		"Russia TZ 1 Standard Time", "Russia TZ 1 Daylight Time",
+		"Europe/Kaliningrad"
+	},
+	{
+		/* (UTC+03:00) Moscow, St. Petersburg */
+		"Russia TZ 2 Standard Time", "Russia TZ 2 Daylight Time",
+		"Europe/Moscow"
+	},
+	{
+		/* (UTC+04:00) Izhevsk, Samara */
+		"Russia TZ 3 Standard Time", "Russia TZ 3 Daylight Time",
+		"Europe/Samara"
+	},
+	{
+		/* (UTC+05:00) Ekaterinburg */
+		"Russia TZ 4 Standard Time", "Russia TZ 4 Daylight Time",
+		"Asia/Yekaterinburg"
+	},
+	{
+		/* (UTC+06:00) Novosibirsk (RTZ 5) */
+		"Russia TZ 5 Standard Time", "Russia TZ 5 Daylight Time",
+		"Asia/Novosibirsk"
+	},
+	{
+		/* (UTC+07:00) Krasnoyarsk */
+		"Russia TZ 6 Standard Time", "Russia TZ 6 Daylight Time",
+		"Asia/Krasnoyarsk"
+	},
+	{
+		/* (UTC+08:00) Irkutsk */
+		"Russia TZ 7 Standard Time", "Russia TZ 7 Daylight Time",
+		"Asia/Irkutsk"
+	},
+	{
+		/* (UTC+09:00) Yakutsk */
+		"Russia TZ 8 Standard Time", "Russia TZ 8 Daylight Time",
+		"Asia/Yakutsk"
+	},
+	{
+		/* (UTC+10:00) Vladivostok */
+		"Russia TZ 9 Standard Time", "Russia TZ 9 Daylight Time",
+		"Asia/Vladivostok"
+	},
+	{
+		/* (UTC+11:00) Chokurdakh */
+		"Russia TZ 10 Standard Time", "Russia TZ 10 Daylight Time",
+		"Asia/Magadan"
+	},
+	{
+		/* (UTC+12:00) Anadyr, Petropavlovsk-Kamchatsky */
+		"Russia TZ 11 Standard Time", "Russia TZ 11 Daylight Time",
+		"Asia/Anadyr"
+	},
+	{
+		/* (UTC+02:00) Gaza, Hebron */
+		"West Bank Gaza Standard Time", "West Bank Gaza Daylight Time",
+		"Asia/Gaza"
+	},
+
 	{
 		NULL, NULL, NULL
 	}
