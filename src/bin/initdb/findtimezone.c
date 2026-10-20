@@ -722,14 +722,9 @@ static const struct
 
 {
 	/*
-	 * This list was built from the contents of the registry at
-	 * HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time
-	 * Zones on Windows 7, Windows 10, and Windows Server 2019.  Some recent
-	 * additions have been made by comparing to the CLDR project's
-	 * windowsZones.xml file.
-	 *
-	 * The zones have been matched to IANA timezones based on CLDR's mapping
-	 * for "territory 001".
+	 * The contents of this array are mostly generated from the CLDR project's
+	 * windowsZones.xml file, using src/tools/gen_win32_tzmap.pl.  See
+	 * src/timezone/README for more information.
 	 */
 	{
 		/* (UTC+04:30) Kabul */
@@ -740,6 +735,11 @@ static const struct
 		/* (UTC-09:00) Alaska */
 		"Alaskan Standard Time", "Alaskan Daylight Time",
 		"America/Anchorage"
+	},
+	{
+		/* (UTC-07:00) Alberta */
+		"Alberta Standard Time", "Alberta Daylight Time",
+		"America/Edmonton"
 	},
 	{
 		/* (UTC-10:00) Aleutian Islands */
@@ -827,12 +827,17 @@ static const struct
 		"Pacific/Bougainville"
 	},
 	{
+		/* (UTC-07:00) British Columbia */
+		"British Columbia Standard Time", "British Columbia Daylight Time",
+		"America/Vancouver"
+	},
+	{
 		/* (UTC-06:00) Saskatchewan */
 		"Canada Central Standard Time", "Canada Central Daylight Time",
 		"America/Regina"
 	},
 	{
-		/* (UTC-01:00) Cape Verde Is. */
+		/* (UTC-01:00) Cabo Verde Is. */
 		"Cape Verde Standard Time", "Cape Verde Daylight Time",
 		"Atlantic/Cape_Verde"
 	},
@@ -854,7 +859,7 @@ static const struct
 	{
 		/* (UTC+06:00) Astana */
 		"Central Asia Standard Time", "Central Asia Daylight Time",
-		"Asia/Almaty"
+		"Asia/Bishkek"
 	},
 	{
 		/* (UTC-04:00) Cuiaba */
@@ -977,13 +982,6 @@ static const struct
 		"America/Godthab"
 	},
 	{
-		/*
-		 * Windows uses this zone name in various places that lie near the
-		 * prime meridian, but are not in the UK.  However, most people
-		 * probably think that "Greenwich" means UK civil time, or maybe even
-		 * straight-up UTC.  Atlantic/Reykjavik is a decent match for that
-		 * interpretation because Iceland hasn't observed DST since 1968.
-		 */
 		/* (UTC+00:00) Monrovia, Reykjavik */
 		"Greenwich Standard Time", "Greenwich Daylight Time",
 		"Atlantic/Reykjavik"
@@ -1059,6 +1057,11 @@ static const struct
 		"America/Punta_Arenas"
 	},
 	{
+		/* (UTC-05:00) Manitoba */
+		"Manitoba Standard Time", "Manitoba Daylight Time",
+		"America/Winnipeg"
+	},
+	{
 		/* (UTC-09:30) Marquesas Islands */
 		"Marquesas Standard Time", "Marquesas Daylight Time",
 		"Pacific/Marquesas"
@@ -1091,7 +1094,7 @@ static const struct
 	{
 		/* (UTC-07:00) Chihuahua, La Paz, Mazatlan */
 		"Mountain Standard Time (Mexico)", "Mountain Daylight Time (Mexico)",
-		"America/Chihuahua"
+		"America/Mazatlan"
 	},
 	{
 		/* (UTC+06:30) Yangon (Rangoon) */
@@ -1341,7 +1344,7 @@ static const struct
 	{
 		/* (UTC) Coordinated Universal Time */
 		"UTC", "UTC",
-		"UTC"
+		"Etc/UTC"
 	},
 	{
 		/* (UTC+12:00) Coordinated Universal Time+12 */
