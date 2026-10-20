@@ -1,0 +1,13 @@
+test_pgport exercises frontend port API semantics without a database server.
+
+The Windows-only test_fopen helper links frontend libpgport and directly calls
+pgwin32_fopen. It covers existing/missing files for the standard update modes,
+both placements of the Windows text marker, and non-update read/write/append
+controls. Assertions check access through the update stream, missing-read
+no-create behavior, creation, truncation, append-after-seek, and persisted CRLF
+or LF bytes. TAP gives the helper an owned fixture path containing spaces.
+
+An optional --native argument is a manual diagnostic CRT control. The in-tree
+regression tests the PostgreSQL wrapper directly and does not depend on that
+control, an extracted wrapper function, a server, networking, or a toolchain
+installation at runtime.
