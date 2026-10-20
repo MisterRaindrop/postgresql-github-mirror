@@ -270,5 +270,8 @@ SELECT * FROM pg_input_error_info('1234', 'cidr');
 SELECT pg_input_is_valid('192.168.198.200/24', 'cidr');
 SELECT * FROM pg_input_error_info('192.168.198.200/24', 'cidr');
 
+-- prefix length that overflows int
+SELECT pg_input_is_valid('192.168.0.0/4294967320', 'inet');
+SELECT pg_input_is_valid('10.0.0.0/4294967304', 'cidr');
 SELECT pg_input_is_valid('1234', 'inet');
 SELECT * FROM pg_input_error_info('1234', 'inet');

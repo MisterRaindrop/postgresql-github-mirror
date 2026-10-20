@@ -1156,6 +1156,19 @@ SELECT * FROM pg_input_error_info('192.168.198.200/24', 'cidr');
  invalid cidr value: "192.168.198.200/24" | Value has bits set to right of mask. |      | 22P02
 (1 row)
 
+-- prefix length that overflows int
+SELECT pg_input_is_valid('192.168.0.0/4294967320', 'inet');
+ pg_input_is_valid 
+-------------------
+ f
+(1 row)
+
+SELECT pg_input_is_valid('10.0.0.0/4294967304', 'cidr');
+ pg_input_is_valid 
+-------------------
+ f
+(1 row)
+
 SELECT pg_input_is_valid('1234', 'inet');
  pg_input_is_valid 
 -------------------
