@@ -31,5 +31,17 @@ SELECT * FROM brin_page_items(get_raw_page('test_1_a_brin_idx', 2), 'test_1_a_br
 ALTER EXTENSION pageinspect UPDATE TO '1.12';
 SELECT * FROM brin_page_items(get_raw_page('test_1_a_brin_idx', 2), 'test_1_a_brin_idx');
 
+-- heap_page_items() lost its t_oid column in 1.14, make sure we detect
+-- an old function definition
+ALTER EXTENSION pageinspect UPDATE TO '1.13';
+INSERT INTO test1 VALUES (1, 'x'), (2, 'y');
+DELETE FROM test1 WHERE a = 1;
+VACUUM test1;
+SELECT lp, lp_flags, t_oid, t_data FROM heap_page_items(get_raw_page('test1', 0));
+SELECT lp, t_oid, t_attrs FROM heap_page_item_attrs(get_raw_page('test1', 0), 'test1');
+
+ALTER EXTENSION pageinspect UPDATE TO '1.14';
+SELECT lp, t_data FROM heap_page_items(get_raw_page('test1', 0));
+
 DROP TABLE test1;
 DROP EXTENSION pageinspect;
