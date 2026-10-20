@@ -46,16 +46,19 @@ as a cross-check on proposed updates.
 
 When there has been a new release of Windows (probably including Service
 Packs), findtimezone.c's mapping from Windows zones to IANA zones may
-need to be updated.  We have two approaches to doing this:
-1. Consult the CLDR project's windowsZones.xml file, and add any zones
-   listed there that we don't have.  Use their "territory=001" mapping
-   if there's more than one IANA zone listed.
-2. Run the script in src/tools/win32tzlist.pl on a Windows machine
-   running the new release, and add any new timezones that it detects.
-   (This is not a full substitute for #1, though, as win32tzlist.pl
-   can't tell you which IANA zone to map to.)
-In either case, never remove any zone names that have disappeared from
-Windows, since we still need to match properly on older versions.
+need to be updated.  We now base that mapping on data maintained by CLDR.
+Obtain the CLDR project's windowsZones.xml file, and run it through
+src/tools/gen_win32_tzmap.pl to obtain a list of current Windows zone names.
+Compare that to the win32_tzmap[] array in src/bin/initdb/findtimezone.c.
+Insert or update entries as necessary, but never remove any zone names
+that have disappeared from Windows, since we still need to match properly
+on older versions.  Instead, move those entries to the list of legacy
+names at the end of the array.  (Multiple array entries mapping to the
+same tzdb zone is not a problem.)
+
+A helpful cross-check on the win32_tzmap[] array is to run the script
+in src/tools/win32tzlist.pl on a Windows machine to see if it detects
+any discrepancies.
 
 
 Time Zone code
