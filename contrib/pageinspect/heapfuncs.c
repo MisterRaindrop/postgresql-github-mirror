@@ -39,21 +39,6 @@
 #include "utils/rel.h"
 
 /*
- * It's not supported to create tuples with oids anymore, but when pg_upgrade
- * was used to upgrade from an older version, tuples might still have an
- * oid. Seems worthwhile to display that.
- */
-static inline Oid
-HeapTupleHeaderGetOidOld(const HeapTupleHeaderData *tup)
-{
-	if (tup->t_infomask & HEAP_HASOID_OLD)
-		return *((const Oid *) ((const char *) (tup) + (tup)->t_hoff - sizeof(Oid)));
-	else
-		return InvalidOid;
-}
-
-
-/*
  * bits_to_text
  *
  * Converts a uint8-array of 'len' bits to a human-readable
@@ -231,7 +216,7 @@ heap_page_items(PG_FUNCTION_ARGS)
 				int			tuple_data_len;
 				bytea	   *tuple_data_bytea;
 
-				/* Copy null bitmask and OID, if present */
+				/* Copy null bitmask, if present */
 				if (tuphdr->t_infomask & HEAP_HASNULL)
 				{
 					int			bitmaplen;
@@ -248,11 +233,6 @@ heap_page_items(PG_FUNCTION_ARGS)
 				else
 					nulls[11] = true;
 
-				if (tuphdr->t_infomask & HEAP_HASOID_OLD)
-					values[12] = ObjectIdGetDatum(HeapTupleHeaderGetOidOld(tuphdr));
-				else
-					nulls[12] = true;
-
 				/* Copy raw tuple data into bytea attribute */
 				tuple_data_len = lp_len - tuphdr->t_hoff;
 				tuple_data_bytea = (bytea *) palloc(tuple_data_len + VARHDRSZ);
@@ -261,13 +241,12 @@ heap_page_items(PG_FUNCTION_ARGS)
 					memcpy(VARDATA(tuple_data_bytea),
 						   (char *) tuphdr + tuphdr->t_hoff,
 						   tuple_data_len);
-				values[13] = PointerGetDatum(tuple_data_bytea);
+				values[12] = PointerGetDatum(tuple_data_bytea);
 			}
 			else
 			{
 				nulls[11] = true;
 				nulls[12] = true;
-				nulls[13] = true;
 			}
 		}
 		else
@@ -278,8 +257,22 @@ heap_page_items(PG_FUNCTION_ARGS)
 			 */
 			int			i;
 
-			for (i = 4; i <= 13; i++)
+			for (i = 4; i <= 12; i++)
 				nulls[i] = true;
+		}
+
+		/*
+		 * Before 1.14 column 13 was t_oid.  It is always NULL now.  1.4 to
+		 * 1.13 also have t_data after it.
+		 */
+		if (TupleDescAttr(inter_call_data->tupd, 12)->atttypid == OIDOID)
+		{
+			if (inter_call_data->tupd->natts == 14)
+			{
+				values[13] = values[12];
+				nulls[13] = nulls[12];
+			}
+			nulls[12] = true;
 		}
 
 		/* Build and return the result tuple. */
@@ -555,8 +548,6 @@ heap_tuple_infomask_flags(PG_FUNCTION_ARGS)
 		flags[cnt++] = CStringGetTextDatum("HEAP_HASVARWIDTH");
 	if ((t_infomask & HEAP_HASEXTERNAL) != 0)
 		flags[cnt++] = CStringGetTextDatum("HEAP_HASEXTERNAL");
-	if ((t_infomask & HEAP_HASOID_OLD) != 0)
-		flags[cnt++] = CStringGetTextDatum("HEAP_HASOID_OLD");
 	if ((t_infomask & HEAP_XMAX_KEYSHR_LOCK) != 0)
 		flags[cnt++] = CStringGetTextDatum("HEAP_XMAX_KEYSHR_LOCK");
 	if ((t_infomask & HEAP_COMBOCID) != 0)
