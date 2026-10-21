@@ -473,6 +473,9 @@ flagInhIndexes(Archive *fout, TableInfo tblinfo[], int numTables)
  *   we are in binary upgrade mode, we dump such expressions anyway because
  *   in those cases inherited tables are recreated standalone first and then
  *   reattached to the parent.  (See also the logic in dumpTableSchema().)
+ *   A child's expression that differs from the parent's is dumped, either
+ *   as part of the column definition or, if the column is inherited without
+ *   a local definition, as a separate ALTER TABLE ... SET EXPRESSION.
  *
  * modifies tblinfo
  */
@@ -640,10 +643,37 @@ flagInhAttrs(Archive *fout, DumpOptions *dopt, TableInfo *tblinfo, int numTables
 				tbinfo->attrdefs[j] = attrDef;
 			}
 
-			/* No need to dump generation expression if it's inheritable */
+			/*
+			 * No need to dump generation expression if it's inheritable.
+			 *
+			 * However, if a parent's expression is itself dumped as a
+			 * separate ALTER TABLE ... SET EXPRESSION command (because the
+			 * parent inherited the column, too, but has a different
+			 * expression than its own parents), the child table must be
+			 * created after that command has run, or else the child would
+			 * inherit the parent's original expression.  Add a dependency to
+			 * enforce that.
+			 */
 			if (foundSameGenerated && !foundDiffGenerated &&
 				!tbinfo->ispartition && !dopt->binary_upgrade)
+			{
 				tbinfo->attrdefs[j]->dobj.dump = DUMP_COMPONENT_NONE;
+
+				for (k = 0; k < numParents; k++)
+				{
+					TableInfo  *parent = parents[k];
+					int			inhAttrInd;
+
+					inhAttrInd = strInArray(tbinfo->attnames[j],
+											parent->attnames,
+											parent->numatts);
+					if (inhAttrInd >= 0 &&
+						parent->attrdefs[inhAttrInd] != NULL &&
+						parent->attrdefs[inhAttrInd]->separate)
+						addObjectDependency(&tbinfo->dobj,
+											parent->attrdefs[inhAttrInd]->dobj.dumpId);
+				}
+			}
 		}
 	}
 }
