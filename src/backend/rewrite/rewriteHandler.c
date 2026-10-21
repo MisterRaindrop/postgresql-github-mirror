@@ -733,9 +733,11 @@ rewriteRuleAction(Query *parsetree,
 									  0,
 									  &rule_action->hasSubLinks);
 
-		/* use triggering query's aliases for OLD and NEW in RETURNING list */
-		rule_action->returningOldAlias = parsetree->returningOldAlias;
-		rule_action->returningNewAlias = parsetree->returningNewAlias;
+		/* use triggering query's aliases for OLD and NEW, if it has any */
+		if (parsetree->returningOldAlias)
+			rule_action->returningOldAlias = parsetree->returningOldAlias;
+		if (parsetree->returningNewAlias)
+			rule_action->returningNewAlias = parsetree->returningNewAlias;
 
 		/*
 		 * There could have been some SubLinks in parsetree's returningList,
