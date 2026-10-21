@@ -9625,19 +9625,7 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 			 * is to put it into the CREATE command, but in some cases that's
 			 * not possible.
 			 */
-			if (tbinfo->attgenerated[adnum - 1])
-			{
-				/*
-				 * Column generation expressions cannot be dumped separately,
-				 * because there is no syntax for it.  By setting separate to
-				 * false here we prevent the "default" from being processed as
-				 * its own dumpable object.  Later, flagInhAttrs() will mark
-				 * it as not to be dumped at all, if possible (that is, if it
-				 * can be inherited from a parent).
-				 */
-				attrdefs[j].separate = false;
-			}
-			else if (tbinfo->relkind == RELKIND_VIEW)
+			if (tbinfo->relkind == RELKIND_VIEW)
 			{
 				/*
 				 * Defaults on a VIEW must always be dumped as separate ALTER
@@ -9647,7 +9635,13 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 			}
 			else if (!shouldPrintColumn(dopt, tbinfo, adnum - 1))
 			{
-				/* column will be suppressed, print default separately */
+				/*
+				 * Column will be suppressed, print default separately.  For a
+				 * generation expression, this means ALTER TABLE ... SET
+				 * EXPRESSION; but flagInhAttrs() will usually mark it as not
+				 * to be dumped at all, since an inherited column normally has
+				 * the same expression as its parent.
+				 */
 				attrdefs[j].separate = true;
 			}
 			else
@@ -18166,6 +18160,11 @@ dumpTableAttach(Archive *fout, const TableAttachInfo *attachinfo)
 
 /*
  * dumpAttrDef --- dump an attribute's default-value declaration
+ *
+ * For a generated column, this emits ALTER TABLE ... SET EXPRESSION rather
+ * than SET DEFAULT.  We get here for such a column only if it is inherited
+ * without a local definition (so it's not printed in CREATE TABLE) and its
+ * expression differs from the parent's; see flagInhAttrs().
  */
 static void
 dumpAttrDef(Archive *fout, const AttrDefInfo *adinfo)
@@ -18183,9 +18182,17 @@ dumpAttrDef(Archive *fout, const AttrDefInfo *adinfo)
 	if (!dopt->dumpSchema)
 		return;
 
-	/* Skip if not "separate"; it was dumped in the table's definition */
+	/*
+	 * Skip if not "separate"; it was dumped in the table's definition.  That
+	 * requires the column itself to be printed there, else the default (or
+	 * generation expression) would be lost entirely.
+	 */
 	if (!adinfo->separate)
+	{
+		Assert(!(adinfo->dobj.dump & DUMP_COMPONENT_DEFINITION) ||
+			   shouldPrintColumn(dopt, tbinfo, adnum - 1));
 		return;
+	}
 
 	q = createPQExpBuffer();
 	delq = createPQExpBuffer();
@@ -18194,17 +18201,33 @@ dumpAttrDef(Archive *fout, const AttrDefInfo *adinfo)
 
 	foreign = tbinfo->relkind == RELKIND_FOREIGN_TABLE ? "FOREIGN " : "";
 
-	appendPQExpBuffer(q,
-					  "ALTER %sTABLE ONLY %s ALTER COLUMN %s SET DEFAULT %s;\n",
-					  foreign, qualrelname, fmtId(tbinfo->attnames[adnum - 1]),
-					  adinfo->adef_expr);
+	if (tbinfo->attgenerated[adnum - 1])
+	{
+		/*
+		 * No drop statement: DROP EXPRESSION would turn the column into a
+		 * regular column (and isn't allowed on an inherited column anyway).
+		 * The expression goes away with the table.
+		 */
+		appendPQExpBuffer(q,
+						  "ALTER %sTABLE ONLY %s ALTER COLUMN %s SET EXPRESSION AS (%s);\n",
+						  foreign, qualrelname, fmtId(tbinfo->attnames[adnum - 1]),
+						  adinfo->adef_expr);
+	}
+	else
+	{
+		appendPQExpBuffer(q,
+						  "ALTER %sTABLE ONLY %s ALTER COLUMN %s SET DEFAULT %s;\n",
+						  foreign, qualrelname, fmtId(tbinfo->attnames[adnum - 1]),
+						  adinfo->adef_expr);
 
-	appendPQExpBuffer(delq, "ALTER %sTABLE %s ALTER COLUMN %s DROP DEFAULT;\n",
-					  foreign, qualrelname,
-					  fmtId(tbinfo->attnames[adnum - 1]));
+		appendPQExpBuffer(delq, "ALTER %sTABLE %s ALTER COLUMN %s DROP DEFAULT;\n",
+						  foreign, qualrelname,
+						  fmtId(tbinfo->attnames[adnum - 1]));
+	}
 
 	tag = psprintf("%s %s", tbinfo->dobj.name, tbinfo->attnames[adnum - 1]);
 
+	/* delq is empty for a generated column (see above): no drop statement */
 	if (adinfo->dobj.dump & DUMP_COMPONENT_DEFINITION)
 		ArchiveEntry(fout, adinfo->dobj.catId, adinfo->dobj.dumpId,
 					 ARCHIVE_OPTS(.tag = tag,
@@ -18213,7 +18236,7 @@ dumpAttrDef(Archive *fout, const AttrDefInfo *adinfo)
 								  .description = "DEFAULT",
 								  .section = SECTION_PRE_DATA,
 								  .createStmt = q->data,
-								  .dropStmt = delq->data));
+								  .dropStmt = delq->len > 0 ? delq->data : NULL));
 
 	pfree(tag);
 	destroyPQExpBuffer(q);

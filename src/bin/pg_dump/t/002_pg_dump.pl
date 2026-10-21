@@ -3951,6 +3951,55 @@ my %tests = (
 		},
 	},
 
+	# Inherited (non-local) generated columns whose expressions were changed
+	# with SET EXPRESSION must have those expressions dumped separately.
+	'CREATE TABLE test_table_generated_child3 (differing expressions)' => {
+		create_order => 4,
+		create_sql => 'CREATE TABLE dump_test.test_table_generated_child3 ()
+						 INHERITS (dump_test.test_table_generated);
+					   ALTER TABLE dump_test.test_table_generated_child3
+						 ALTER COLUMN col2 SET EXPRESSION AS (col1 * 4),
+						 ALTER COLUMN col3 SET EXPRESSION AS (col1 * 5);',
+		regexp => qr/^
+			\QCREATE TABLE dump_test.test_table_generated_child3 (\E\n
+			\)\n
+			\QINHERITS (dump_test.test_table_generated);\E\n
+			/xms,
+		like =>
+		  { %full_runs, %dump_test_schema_runs, section_pre_data => 1, },
+		unlike => {
+			binary_upgrade => 1,
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
+	'ALTER TABLE test_table_generated_child3 SET EXPRESSION (stored)' => {
+		regexp => qr/^
+			\QALTER TABLE ONLY dump_test.test_table_generated_child3 ALTER COLUMN col2 SET EXPRESSION AS ((col1 * 4));\E\n
+			/xm,
+		like =>
+		  { %full_runs, %dump_test_schema_runs, section_pre_data => 1, },
+		unlike => {
+			binary_upgrade => 1,
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
+	'ALTER TABLE test_table_generated_child3 SET EXPRESSION (virtual)' => {
+		regexp => qr/^
+			\QALTER TABLE ONLY dump_test.test_table_generated_child3 ALTER COLUMN col3 SET EXPRESSION AS ((col1 * 5));\E\n
+			/xm,
+		like =>
+		  { %full_runs, %dump_test_schema_runs, section_pre_data => 1, },
+		unlike => {
+			binary_upgrade => 1,
+			exclude_dump_test_schema => 1,
+			only_dump_measurement => 1,
+		},
+	},
+
 	'CREATE TABLE table_with_stats' => {
 		create_order => 98,
 		create_sql => 'CREATE TABLE dump_test.table_index_stats (
