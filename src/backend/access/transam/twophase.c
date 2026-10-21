@@ -1536,7 +1536,9 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 	 * in WAL files if the LSN is after the last checkpoint record, or moved
 	 * to disk if for some reason they have lived for a long time.
 	 */
-	if (gxact->ondisk)
+	ondisk = gxact->ondisk;
+	INJECTION_POINT("twophase-finish-after-ondisk-read", NULL);
+	if (ondisk)
 		buf = ReadTwoPhaseFile(fxid, false);
 	else
 		XlogReadTwoPhaseData(gxact->prepare_start_lsn, &buf, NULL);
@@ -1872,6 +1874,7 @@ CheckPointTwoPhase(XLogRecPtr redo_horizon)
 			XlogReadTwoPhaseData(gxact->prepare_start_lsn, &buf, &len);
 			RecreateTwoPhaseFile(gxact->fxid, buf, len);
 			gxact->ondisk = true;
+			INJECTION_POINT("twophase-checkpoint-after-ondisk-set", NULL);
 			gxact->prepare_start_lsn = InvalidXLogRecPtr;
 			gxact->prepare_end_lsn = InvalidXLogRecPtr;
 			pfree(buf);
