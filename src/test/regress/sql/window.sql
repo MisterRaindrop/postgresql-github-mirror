@@ -587,6 +587,12 @@ from generate_series(9223372036854775804, 9223372036854775806) x;
 select x, last_value(x) over (order by x desc range between current row and 5 following)
 from generate_series(-9223372036854775806, -9223372036854775804) x;
 
+SELECT v,
+       lead(v, -2147483648) OVER w AS respect_nulls,
+       lead(v, -2147483648) IGNORE NULLS OVER w AS ignore_nulls
+FROM (VALUES (1), (2)) AS t(v)
+WINDOW w AS (ORDER BY v);
+
 -- Test in_range for other numeric datatypes
 
 create temp table numerics(
