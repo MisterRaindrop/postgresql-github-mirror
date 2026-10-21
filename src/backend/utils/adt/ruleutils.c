@@ -479,7 +479,7 @@ static void get_rule_list_toplevel(List *lst, deparse_context *context,
 								   bool showimplicit);
 static void get_rule_expr_funccall(Node *node, deparse_context *context,
 								   bool showimplicit);
-static bool looks_like_function(Node *node);
+static bool looks_like_function(Node *node, bool in_from);
 static void get_oper_expr(OpExpr *expr, deparse_context *context);
 static void get_func_expr(FuncExpr *expr, deparse_context *context,
 						  bool showimplicit);
@@ -1460,7 +1460,7 @@ pg_get_indexdef_worker(Oid indexrelid, int colno,
 			if (!colno || colno == keyno + 1)
 			{
 				/* Need parens if it's not a bare function call */
-				if (looks_like_function(indexkey))
+				if (looks_like_function(indexkey, false))
 					appendStringInfoString(&buf, str);
 				else
 					appendStringInfo(&buf, "(%s)", str);
@@ -2175,7 +2175,7 @@ pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok)
 			appendStringInfoString(&buf, ", ");
 
 		/* Need parens if it's not a bare function call */
-		if (looks_like_function(expr))
+		if (looks_like_function(expr, false))
 			appendStringInfoString(&buf, str);
 		else
 			appendStringInfo(&buf, "(%s)", str);
@@ -2419,7 +2419,7 @@ pg_get_partkeydef_worker(Oid relid, int prettyFlags,
 			str = deparse_expression_pretty(partkey, context, false, false,
 											prettyFlags, 0);
 			/* Need parens if it's not a bare function call */
-			if (looks_like_function(partkey))
+			if (looks_like_function(partkey, false))
 				appendStringInfoString(&buf, str);
 			else
 				appendStringInfo(&buf, "(%s)", str);
@@ -11271,7 +11271,7 @@ static void
 get_rule_expr_funccall(Node *node, deparse_context *context,
 					   bool showimplicit)
 {
-	if (looks_like_function(node))
+	if (looks_like_function(node, true))
 		get_rule_expr(node, context, showimplicit);
 	else
 	{
@@ -11289,9 +11289,15 @@ get_rule_expr_funccall(Node *node, deparse_context *context,
 /*
  * Helper function to identify node types that satisfy func_expr_windowless.
  * If in doubt, "false" is always a safe answer.
+ *
+ * in_from is true for a function in FROM or ROWS FROM, the only places that
+ * need func_expr_windowless itself.  Index, statistics and partition keys
+ * also accept a parenthesized a_expr; their callers only decide whether to
+ * add parentheses, so for them we also accept SQL-syntax functions that
+ * print with their own.
  */
 static bool
-looks_like_function(Node *node)
+looks_like_function(Node *node, bool in_from)
 {
 	if (node == NULL)
 		return false;			/* probably shouldn't happen */
@@ -11299,8 +11305,50 @@ looks_like_function(Node *node)
 	{
 		case T_FuncExpr:
 			/* OK, unless it's going to deparse as a cast */
-			return (((FuncExpr *) node)->funcformat == COERCE_EXPLICIT_CALL ||
-					((FuncExpr *) node)->funcformat == COERCE_SQL_SYNTAX);
+			if (((FuncExpr *) node)->funcformat == COERCE_EXPLICIT_CALL)
+				return true;
+			if (((FuncExpr *) node)->funcformat != COERCE_SQL_SYNTAX)
+				return false;
+			if (!in_from)
+				return true;
+
+			/*
+			 * Most SQL-syntax functions are accepted by
+			 * func_expr_common_subexpr, but get_func_sql_syntax() prints AT
+			 * TIME ZONE, AT LOCAL, OVERLAPS and IS NORMALIZED as a
+			 * parenthesized a_expr, which FROM does not accept.  This must
+			 * list all of their cases there.
+			 */
+			switch (((FuncExpr *) node)->funcid)
+			{
+				case F_TIMEZONE_INTERVAL_TIMESTAMP:
+				case F_TIMEZONE_INTERVAL_TIMESTAMPTZ:
+				case F_TIMEZONE_INTERVAL_TIMETZ:
+				case F_TIMEZONE_TEXT_TIMESTAMP:
+				case F_TIMEZONE_TEXT_TIMESTAMPTZ:
+				case F_TIMEZONE_TEXT_TIMETZ:
+				case F_TIMEZONE_TIMESTAMP:
+				case F_TIMEZONE_TIMESTAMPTZ:
+				case F_TIMEZONE_TIMETZ:
+				case F_OVERLAPS_TIMESTAMPTZ_INTERVAL_TIMESTAMPTZ_INTERVAL:
+				case F_OVERLAPS_TIMESTAMPTZ_INTERVAL_TIMESTAMPTZ_TIMESTAMPTZ:
+				case F_OVERLAPS_TIMESTAMPTZ_TIMESTAMPTZ_TIMESTAMPTZ_INTERVAL:
+				case F_OVERLAPS_TIMESTAMPTZ_TIMESTAMPTZ_TIMESTAMPTZ_TIMESTAMPTZ:
+				case F_OVERLAPS_TIMESTAMP_INTERVAL_TIMESTAMP_INTERVAL:
+				case F_OVERLAPS_TIMESTAMP_INTERVAL_TIMESTAMP_TIMESTAMP:
+				case F_OVERLAPS_TIMESTAMP_TIMESTAMP_TIMESTAMP_INTERVAL:
+				case F_OVERLAPS_TIMESTAMP_TIMESTAMP_TIMESTAMP_TIMESTAMP:
+				case F_OVERLAPS_TIMETZ_TIMETZ_TIMETZ_TIMETZ:
+				case F_OVERLAPS_TIME_INTERVAL_TIME_INTERVAL:
+				case F_OVERLAPS_TIME_INTERVAL_TIME_TIME:
+				case F_OVERLAPS_TIME_TIME_TIME_INTERVAL:
+				case F_OVERLAPS_TIME_TIME_TIME_TIME:
+				case F_IS_NORMALIZED:
+					return false;
+				default:
+					break;
+			}
+			return true;
 		case T_NullIfExpr:
 		case T_CoalesceExpr:
 		case T_MinMaxExpr:
@@ -11737,6 +11785,11 @@ get_windowfunc_expr_helper(WindowFunc *wfunc, deparse_context *context,
  *
  * Returns true if we successfully deparsed, false if we did not
  * recognize the function.
+ *
+ * Most of these print as KEYWORD(...), which func_expr_common_subexpr
+ * accepts.  AT TIME ZONE, AT LOCAL, OVERLAPS and IS NORMALIZED print as a
+ * parenthesized a_expr instead, so a function added to them, or another one
+ * printed that way, must also be listed in looks_like_function().
  */
 static bool
 get_func_sql_syntax(FuncExpr *expr, deparse_context *context)
@@ -11752,7 +11805,11 @@ get_func_sql_syntax(FuncExpr *expr, deparse_context *context)
 		case F_TIMEZONE_TEXT_TIMESTAMP:
 		case F_TIMEZONE_TEXT_TIMESTAMPTZ:
 		case F_TIMEZONE_TEXT_TIMETZ:
-			/* AT TIME ZONE ... note reversed argument order */
+
+			/*
+			 * AT TIME ZONE ... note reversed argument order; see
+			 * looks_like_function()
+			 */
 			appendStringInfoChar(buf, '(');
 			get_rule_expr_paren((Node *) lsecond(expr->args), context, false,
 								(Node *) expr);
@@ -11765,7 +11822,7 @@ get_func_sql_syntax(FuncExpr *expr, deparse_context *context)
 		case F_TIMEZONE_TIMESTAMP:
 		case F_TIMEZONE_TIMESTAMPTZ:
 		case F_TIMEZONE_TIMETZ:
-			/* AT LOCAL */
+			/* AT LOCAL; see looks_like_function() */
 			appendStringInfoChar(buf, '(');
 			get_rule_expr_paren((Node *) linitial(expr->args), context, false,
 								(Node *) expr);
@@ -11785,7 +11842,7 @@ get_func_sql_syntax(FuncExpr *expr, deparse_context *context)
 		case F_OVERLAPS_TIME_INTERVAL_TIME_TIME:
 		case F_OVERLAPS_TIME_TIME_TIME_INTERVAL:
 		case F_OVERLAPS_TIME_TIME_TIME_TIME:
-			/* (x1, x2) OVERLAPS (y1, y2) */
+			/* (x1, x2) OVERLAPS (y1, y2); see looks_like_function() */
 			appendStringInfoString(buf, "((");
 			get_rule_expr((Node *) linitial(expr->args), context, false);
 			appendStringInfoString(buf, ", ");
@@ -11819,7 +11876,7 @@ get_func_sql_syntax(FuncExpr *expr, deparse_context *context)
 			return true;
 
 		case F_IS_NORMALIZED:
-			/* IS xxx NORMALIZED */
+			/* IS xxx NORMALIZED; see looks_like_function() */
 			appendStringInfoChar(buf, '(');
 			get_rule_expr_paren((Node *) linitial(expr->args), context, false,
 								(Node *) expr);
