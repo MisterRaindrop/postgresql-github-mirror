@@ -27,6 +27,11 @@ tests += {
   'name': 'pg_walinspect',
   'sd': meson.current_source_dir(),
   'bd': meson.current_build_dir(),
+  'tap': {
+    'tests': [
+      't/001_timeline.pl',
+    ],
+  },
   'regress': {
     'sql': [
       'pg_walinspect',
