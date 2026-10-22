@@ -20825,11 +20825,23 @@ preprocess_pubobj_list(List *pubobjspec_list, core_yyscan_t yyscanner)
 
 	pubobj = (PublicationObjSpec *) linitial(pubobjspec_list);
 	if (pubobj->pubobjtype == PUBLICATIONOBJ_CONTINUATION)
-		ereport(ERROR,
-				errcode(ERRCODE_SYNTAX_ERROR),
-				errmsg("invalid publication object list"),
-				errdetail("One of TABLE or TABLES IN SCHEMA must be specified before a standalone table or schema name."),
-				parser_errposition(pubobj->location));
+	{
+		if (pubobj->name)
+			ereport(ERROR,
+					errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("invalid publication object list"),
+					errdetail("One of TABLE or TABLES IN SCHEMA must be specified before standalone table or schema name \"%s\".",
+							  pubobj->name),
+					errhint("Valid publication objects are TABLE, TABLES IN SCHEMA, ALL TABLES, and ALL SEQUENCES."),
+					parser_errposition(pubobj->location));
+		else
+			ereport(ERROR,
+					errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("invalid publication object list"),
+					errdetail("One of TABLE or TABLES IN SCHEMA must be specified before a standalone table or schema name."),
+					errhint("Valid publication objects are TABLE, TABLES IN SCHEMA, ALL TABLES, and ALL SEQUENCES."),
+					parser_errposition(pubobj->location));
+	}
 
 	foreach(cell, pubobjspec_list)
 	{

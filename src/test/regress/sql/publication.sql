@@ -1129,6 +1129,12 @@ CREATE PUBLICATION testpub_forschema1 FOR CURRENT_SCHEMA;
 -- check create publication on CURRENT_SCHEMA along with FOR TABLE
 CREATE PUBLICATION testpub_forschema1 FOR TABLE CURRENT_SCHEMA;
 
+-- check create publication error detail names the standalone word when the
+-- parser has one, e.g. a natural but nonexistent attempt at publishing
+-- sequences or a schema's tables by name
+CREATE PUBLICATION testpub_forseq FOR SEQUENCE s1;
+CREATE PUBLICATION testpub_forschema2 FOR SCHEMA pub_test1;
+
 -- check create publication on a schema that does not exist
 CREATE PUBLICATION testpub_forschema FOR TABLES IN SCHEMA non_existent_schema;
 
