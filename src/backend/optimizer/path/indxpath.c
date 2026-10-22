@@ -2490,7 +2490,7 @@ match_join_clauses_to_index(PlannerInfo *root,
 		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
 
 		/* Check if clause can be moved to this rel */
-		if (!join_clause_is_movable_to(rinfo, rel))
+		if (!join_clause_is_movable_to(rinfo, rel, false))
 			continue;
 
 		/*
@@ -3980,7 +3980,7 @@ check_index_predicates(PlannerInfo *root, RelOptInfo *rel)
 		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
 
 		/* Check if clause can be moved to this rel */
-		if (!join_clause_is_movable_to(rinfo, rel))
+		if (!join_clause_is_movable_to(rinfo, rel, false))
 			continue;
 
 		clauselist = lappend(clauselist, rinfo);

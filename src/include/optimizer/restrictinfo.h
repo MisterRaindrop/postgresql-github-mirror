@@ -54,7 +54,9 @@ extern void extract_actual_join_clauses(List *restrictinfo_list,
 										Relids joinrelids,
 										List **joinquals,
 										List **otherquals);
-extern bool join_clause_is_movable_to(RestrictInfo *rinfo, RelOptInfo *baserel);
+extern bool join_clause_is_movable_to(RestrictInfo *rinfo,
+										RelOptInfo *baserel,
+										bool lateral_referencers_allowed);
 extern bool join_clause_is_movable_into(RestrictInfo *rinfo,
 										Relids currentrelids,
 										Relids current_and_outer);

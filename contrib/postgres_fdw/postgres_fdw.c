@@ -1201,7 +1201,7 @@ postgresGetForeignPaths(PlannerInfo *root,
 		ParamPathInfo *param_info;
 
 		/* Check if clause can be moved to this rel */
-		if (!join_clause_is_movable_to(rinfo, baserel))
+		if (!join_clause_is_movable_to(rinfo, baserel, false))
 			continue;
 
 		/* See if it is safe to send to remote */
@@ -1277,7 +1277,7 @@ postgresGetForeignPaths(PlannerInfo *root,
 				ParamPathInfo *param_info;
 
 				/* Check if clause can be moved to this rel */
-				if (!join_clause_is_movable_to(rinfo, baserel))
+				if (!join_clause_is_movable_to(rinfo, baserel, false))
 					continue;
 
 				/* See if it is safe to send to remote */
