@@ -777,6 +777,7 @@ XLogReadDetermineTimeline(XLogReaderState *state, XLogRecPtr wantPage,
 	if (XLogRecPtrIsValid(state->currTLIValidUntil) &&
 		state->currTLI != currTLI &&
 		state->currTLI != 0 &&
+		wantPage >= lastReadPage &&
 		((wantPage + wantLength) / state->segcxt.ws_segsize) <
 		(state->currTLIValidUntil / state->segcxt.ws_segsize))
 		return;
