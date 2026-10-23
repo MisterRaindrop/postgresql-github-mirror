@@ -586,6 +586,15 @@ void XLogRegisterBuffer(uint8 block_id, Buffer buf, uint8 flags);
     XLogRegisterBufData() is included in the WAL record even if a full-page
     image is taken.
 
+    The REGBUF_NO_CHANGE flag indicates that the buffer is registered without
+    being modified by this record, and possibly without an exclusive content
+    lock (for example, to force a cleanup lock on the block during replay).
+    Such a buffer never has a full-page image taken, not even when WAL
+    consistency checking is enabled: its contents may change concurrently
+    while the record is assembled, which would compute the record CRC over
+    data a concurrent backend can still modify, and there is nothing to
+    consistency-check on a block the record does not change.
+
 void XLogRegisterData(const void *data, int len);
 
     XLogRegisterData is used to include arbitrary data in the WAL record.  If

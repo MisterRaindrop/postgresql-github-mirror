@@ -716,8 +716,21 @@ XLogRecordAssemble(RmgrId rmid, uint8 info,
 		/*
 		 * If needs_backup is true or WAL checking is enabled for current
 		 * resource manager, log a full-page write for the current block.
+		 *
+		 * However, a buffer registered with REGBUF_NO_CHANGE is not modified
+		 * by this record and may be held with only a pin (no content lock),
+		 * so its contents could change under us while we assemble the record.
+		 * Including such a page would compute the record CRC over data that a
+		 * concurrent backend can modify before the record is copied into the
+		 * WAL buffers, producing a spurious "incorrect resource manager data
+		 * checksum" failure.  These blocks are registered only to force a
+		 * cleanup lock during replay, so there is nothing to consistency-check
+		 * anyway; never take an image for them.
 		 */
-		include_image = needs_backup || (info & XLR_CHECK_CONSISTENCY) != 0;
+		if (regbuf->flags & REGBUF_NO_CHANGE)
+			include_image = needs_backup;
+		else
+			include_image = needs_backup || (info & XLR_CHECK_CONSISTENCY) != 0;
 
 		if (include_image)
 		{
