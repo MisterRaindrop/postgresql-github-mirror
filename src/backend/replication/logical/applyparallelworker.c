@@ -357,8 +357,12 @@ pa_setup_dsm(ParallelApplyWorkerInfo *winfo)
 	shm_toc_estimate_keys(&e, 3);
 	segsize = shm_toc_estimate(&e);
 
-	/* Create the shared memory segment and establish a table of contents. */
-	seg = dsm_create(shm_toc_estimate(&e), 0);
+	/*
+	 * Create the shared memory segment and establish a table of contents.
+	 * If no segment is available, return false so that the caller applies
+	 * the transaction itself.
+	 */
+	seg = dsm_create(segsize, DSM_CREATE_NULL_IF_MAXSEGMENTS);
 	if (!seg)
 		return false;
 
