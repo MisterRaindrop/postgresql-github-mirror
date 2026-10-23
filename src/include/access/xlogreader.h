@@ -284,12 +284,11 @@ struct XLogReaderState
 	TimeLineID	currTLI;
 
 	/*
-	 * Safe point to read to in currTLI if current TLI is historical
-	 * (tliSwitchPoint) or InvalidXLogRecPtr if on current timeline.
+	 * Exclusive end LSN of currTLI if current TLI is historical
+	 * (tliSwitchPoint), or InvalidXLogRecPtr if on current timeline.
 	 *
-	 * Actually set to the start of the segment containing the timeline switch
-	 * that ends currTLI's validity, not the LSN of the switch its self, since
-	 * we can't assume the old segment will be present.
+	 * This is the LSN of the switch itself. See XLogReadDetermineTimeline()
+	 * for selection of the segment containing the timeline switch.
 	 */
 	XLogRecPtr	currTLIValidUntil;
 

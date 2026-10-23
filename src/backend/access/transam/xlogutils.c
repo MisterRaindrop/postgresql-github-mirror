@@ -712,11 +712,10 @@ XLogTruncateRelation(RelFileLocator rlocator, ForkNumber forkNum,
  * renamed with a .partial suffix so we can't necessarily keep reading from
  * the old TLI even though tliSwitchPoint says it's OK.
  *
- * We can't just check the timeline when we read a page on a different segment
- * to the last page. We could've received a timeline switch from a cascading
- * upstream, so the current segment ends abruptly (possibly getting renamed to
- * .partial) and we have to switch to a new one.  Even in the middle of reading
- * a page we could have to dump the cached page and switch to a new TLI.
+ * We can't just check the timeline when we read a page in a different segment
+ * from the last page. An upstream promotion can change the timeline while we
+ * remain in recovery, so we may need to switch to the new timeline's segment
+ * even when reading more of the same page.
  *
  * Because of this, callers MAY NOT assume that currTLI is the timeline that
  * will be in a page's xlp_tli; the page may begin on an older timeline or we
@@ -743,7 +742,7 @@ XLogReadDetermineTimeline(XLogReaderState *state, XLogRecPtr wantPage,
 	 * If the desired page is currently read in and valid, we have nothing to
 	 * do.
 	 *
-	 * The caller should've ensured that it didn't previously advance readOff
+	 * The caller should've ensured that it didn't previously read
 	 * past the valid limit of this timeline, so it doesn't matter if the
 	 * current TLI has since become historical.
 	 */
@@ -754,14 +753,15 @@ XLogReadDetermineTimeline(XLogReaderState *state, XLogRecPtr wantPage,
 
 	/*
 	 * If we're reading from the current timeline, it hasn't become historical
-	 * and the page we're reading is after the last page read, we can again
-	 * just carry on. (Seeking backwards requires a check to make sure the
-	 * older page isn't on a prior timeline).
+	 * and the page we're reading is at or after the last page read, we can
+	 * again just carry on. (Seeking backwards requires a check to make sure
+	 * the older page isn't on a prior timeline).
 	 *
 	 * currTLI might've become historical since the caller obtained the value,
-	 * but the caller is required not to read past the flush limit it saw at
-	 * the time it looked up the timeline. There's nothing we can do about it
-	 * if StartupXLOG() renames it to .partial concurrently.
+	 * but the caller is required not to read past the read limit (flush or
+	 * replay position) it saw at the time it looked up the timeline.
+	 * StartupXLOG() may rename the old timeline's last segment to .partial
+	 * concurrently, before we open it.
 	 */
 	if (state->currTLI == currTLI && wantPage >= lastReadPage)
 	{
@@ -940,24 +940,21 @@ read_local_xlog_page_guts(XLogReaderState *state, XLogRecPtr targetPagePtr,
 		 *
 		 * We have to do it each time through the loop because if we're in
 		 * recovery as a cascading standby, the current timeline might've
-		 * become historical. We can't rely on RecoveryInProgress() because in
-		 * a standby configuration like
+		 * become historical while we were waiting for WAL. We can't rely on
+		 * RecoveryInProgress() because in a standby configuration like
 		 *
 		 * A => B => C
 		 *
 		 * if we're a logical decoding session on C, and B gets promoted, our
 		 * timeline will change while we remain in recovery.
 		 *
-		 * We can't just keep reading from the old timeline as the last WAL
-		 * archive in the timeline will get renamed to .partial by
-		 * StartupXLOG().
+		 * Separately, during promotion of this server, StartupXLOG() may
+		 * rename the old timeline's last WAL segment to .partial.
 		 *
-		 * If that happens after our caller determined the TLI but before we
-		 * actually read the xlog page, we might still try to read from the
-		 * old (now renamed) segment and fail. There's not much we can do
-		 * about this, but it can only happen when we're a leaf of a cascading
-		 * standby whose primary gets promoted while we're decoding, so a
-		 * one-off ERROR isn't too bad.
+		 * If we determined the TLI before the new insertion timeline was
+		 * published, we might still try to open the old (now renamed) segment
+		 * and fail with an ERROR. We don't retry the open here. An
+		 * already-open file remains usable after the rename.
 		 */
 		XLogReadDetermineTimeline(state, targetPagePtr, reqLen, tli);
 
@@ -991,19 +988,16 @@ read_local_xlog_page_guts(XLogReaderState *state, XLogRecPtr targetPagePtr,
 			 * We're on a historical timeline, so limit reading to the switch
 			 * point where we moved to the next timeline.
 			 *
-			 * We don't need to GetFlushRecPtr or GetXLogReplayRecPtr. We know
-			 * about the new timeline, so we must've received past the end of
-			 * it.
+			 * We don't need another GetFlushRecPtr or GetXLogReplayRecPtr
+			 * call. The server has already moved to a newer timeline, so we
+			 * can read up to this timeline's switch point without waiting.
 			 */
 			read_upto = state->currTLIValidUntil;
 
 			/*
-			 * Setting tli to our wanted record's TLI is slightly wrong; the
-			 * page might begin on an older timeline if it contains a timeline
-			 * switch, since its xlog segment will have been copied from the
-			 * prior timeline. This is pretty harmless though, as nothing
-			 * cares so long as the timeline doesn't go backwards.  We should
-			 * read the page header instead; FIXME someday.
+			 * Use the selected timeline's segment file. The page might begin
+			 * on an older timeline, since its xlog segment may have been
+			 * copied from a prior timeline. See XLogReadDetermineTimeline().
 			 */
 			tli = state->currTLI;
 
