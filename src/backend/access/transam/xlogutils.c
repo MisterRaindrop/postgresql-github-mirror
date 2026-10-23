@@ -735,7 +735,7 @@ XLogReadDetermineTimeline(XLogReaderState *state, XLogRecPtr wantPage,
 
 	Assert(XLogRecPtrIsValid(wantPage) && wantPage % XLOG_BLCKSZ == 0);
 	Assert(wantLength <= XLOG_BLCKSZ);
-	Assert(state->readLen == 0 || state->readLen <= XLOG_BLCKSZ);
+	Assert(state->readLen <= XLOG_BLCKSZ);
 	Assert(currTLI != 0);
 
 	/*
@@ -815,7 +815,7 @@ XLogReadDetermineTimeline(XLogReaderState *state, XLogRecPtr wantPage,
 												  &state->nextTLI);
 
 		Assert(!XLogRecPtrIsValid(state->currTLIValidUntil) ||
-			   wantPage + wantLength < state->currTLIValidUntil);
+			   wantPage + wantLength <= state->currTLIValidUntil);
 
 		list_free_deep(timelineHistory);
 
@@ -896,7 +896,6 @@ read_local_xlog_page_guts(XLogReaderState *state, XLogRecPtr targetPagePtr,
 {
 	XLogRecPtr	read_upto,
 				loc;
-	TimeLineID	tli;
 	int			count;
 	WALReadError errinfo;
 	TimeLineID	currTLI;
@@ -933,7 +932,6 @@ read_local_xlog_page_guts(XLogReaderState *state, XLogRecPtr targetPagePtr,
 			if (insertTLI != 0)
 				currTLI = insertTLI;
 		}
-		tli = currTLI;
 
 		/*
 		 * Check which timeline to get the record from.
@@ -956,7 +954,7 @@ read_local_xlog_page_guts(XLogReaderState *state, XLogRecPtr targetPagePtr,
 		 * and fail with an ERROR. We don't retry the open here. An
 		 * already-open file remains usable after the rename.
 		 */
-		XLogReadDetermineTimeline(state, targetPagePtr, reqLen, tli);
+		XLogReadDetermineTimeline(state, targetPagePtr, reqLen, currTLI);
 
 		if (state->currTLI == currTLI)
 		{
@@ -994,13 +992,6 @@ read_local_xlog_page_guts(XLogReaderState *state, XLogRecPtr targetPagePtr,
 			 */
 			read_upto = state->currTLIValidUntil;
 
-			/*
-			 * Use the selected timeline's segment file. The page might begin
-			 * on an older timeline, since its xlog segment may have been
-			 * copied from a prior timeline. See XLogReadDetermineTimeline().
-			 */
-			tli = state->currTLI;
-
 			/* No need to wait on a historical timeline */
 			break;
 		}
@@ -1025,7 +1016,12 @@ read_local_xlog_page_guts(XLogReaderState *state, XLogRecPtr targetPagePtr,
 		count = read_upto - targetPagePtr;
 	}
 
-	if (!WALRead(state, cur_page, targetPagePtr, count, tli,
+	/*
+	 * Use the selected timeline's segment file. The page might begin
+	 * on an older timeline, since its xlog segment may have been
+	 * copied from a prior timeline. See XLogReadDetermineTimeline().
+	 */
+	if (!WALRead(state, cur_page, targetPagePtr, count, state->currTLI,
 				 &errinfo))
 		WALReadRaiseError(&errinfo);
 
