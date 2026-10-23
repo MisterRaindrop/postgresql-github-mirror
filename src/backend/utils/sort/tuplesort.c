@@ -121,6 +121,7 @@
 
 /* GUC variables */
 bool		trace_sort = false;
+bool		debug_topn_quickselect = true;
 
 #ifdef DEBUG_BOUNDED_SORT
 bool		optimize_bounded_sort = true;
@@ -1148,7 +1149,7 @@ tuplesort_puttuple_common(Tuplesortstate *state, SortTuple *tuple,
 				 * Below a bound of 8 the buffer refills too often to pay for
 				 * itself, and the heap wins.
 				 */
-				if (state->bound >= 8 && !LACKMEM(state))
+				if (debug_topn_quickselect && state->bound >= 8 && !LACKMEM(state))
 				{
 					if (trace_sort)
 						elog(LOG, "switching to bounded quickselect at %d tuples: %s",
