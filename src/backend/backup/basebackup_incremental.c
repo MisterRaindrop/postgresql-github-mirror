@@ -434,6 +434,22 @@ PrepareForIncrementalBackup(IncrementalBackupInfo *ib,
 								LSN_FORMAT_ARGS(range->end_lsn),
 								LSN_FORMAT_ARGS(backup_state->startpoint)),
 						 errhint("This can happen for incremental backups on a standby if there was little activity since the previous backup.")));
+
+			/*
+			 * If this server has since switched away from that timeline, the
+			 * prior backup must not require WAL from past the switch point.
+			 * Otherwise it contains changes that are not part of this
+			 * server's history, as when the backup was taken on a primary
+			 * whose last transactions never reached the standby that was
+			 * later promoted.
+			 */
+			if (XLogRecPtrIsValid(tlep[i]->end) && range->end_lsn > tlep[i]->end)
+				ereport(ERROR,
+						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						 errmsg("manifest requires WAL from final timeline %u ending at %X/%08X, but this server switched timelines at %X/%08X",
+								range->tli,
+								LSN_FORMAT_ARGS(range->end_lsn),
+								LSN_FORMAT_ARGS(tlep[i]->end))));
 		}
 		else
 		{
