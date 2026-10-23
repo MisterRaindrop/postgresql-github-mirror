@@ -22,6 +22,37 @@
 #include "storage/predicate.h"
 #include "utils/rel.h"
 
+/*
+ * PROTOTYPE: batch the metapage tuple count.  Each backend accumulates up to
+ * HASH_NTUPLES_BATCH inserts per index locally and only then takes the
+ * metapage exclusive lock to add them and check whether to split.
+ *
+ * shortcut: fixed 8-slot backend-local table, counts lost at backend exit
+ * (VACUUM recomputes hashm_ntuples); upgrade to a proper per-relation cache
+ * entry with flush at end of xact if this goes anywhere.
+ */
+#define HASH_NTUPLES_BATCH 64
+#define HASH_PENDING_SLOTS 8
+static Oid	hash_pending_relid[HASH_PENDING_SLOTS];
+static uint32 hash_pending_count[HASH_PENDING_SLOTS];
+
+static uint32 *
+hash_pending_slot(Relation rel)
+{
+	for (int i = 0; i < HASH_PENDING_SLOTS; i++)
+	{
+		if (hash_pending_relid[i] == RelationGetRelid(rel))
+			return &hash_pending_count[i];
+		if (hash_pending_relid[i] == InvalidOid)
+		{
+			hash_pending_relid[i] = RelationGetRelid(rel);
+			hash_pending_count[i] = 0;
+			return &hash_pending_count[i];
+		}
+	}
+	return NULL;				/* full: fall back to per-insert update */
+}
+
 static void _hash_vacuum_one_page(Relation rel, Relation hrel,
 								  Buffer metabuf, Buffer buf);
 
@@ -47,6 +78,9 @@ _hash_doinsert(Relation rel, IndexTuple itup, Relation heapRel, bool sorted)
 	HashPageOpaque pageopaque;
 	Size		itemsz;
 	bool		do_expand;
+	bool		flush_count;
+	uint32	   *pending;
+	uint32		delta = 1;
 	uint32		hashkey;
 	Bucket		bucket;
 	OffsetNumber itup_off;
@@ -191,10 +225,18 @@ restart_insert:
 	}
 
 	/*
-	 * Write-lock the metapage so we can increment the tuple count. After
-	 * incrementing it, check to see if it's time for a split.
+	 * Only every HASH_NTUPLES_BATCH'th insert by this backend write-locks the
+	 * metapage to publish the tuple count and check for a split.
 	 */
-	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+	pending = hash_pending_slot(rel);
+	flush_count = (pending == NULL || ++(*pending) >= HASH_NTUPLES_BATCH);
+	if (flush_count && pending != NULL)
+	{
+		delta = *pending;
+		*pending = 0;
+	}
+	if (flush_count)
+		LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
 
 	/* Do the update.  No ereport(ERROR) until changes are logged */
 	START_CRIT_SECTION();
@@ -203,15 +245,18 @@ restart_insert:
 	itup_off = _hash_pgaddtup(rel, buf, itemsz, itup, sorted);
 	MarkBufferDirty(buf);
 
-	/* metapage operations */
-	metap = HashPageGetMeta(metapage);
-	metap->hashm_ntuples += 1;
+	do_expand = false;
+	if (flush_count)
+	{
+		metap = HashPageGetMeta(metapage);
+		metap->hashm_ntuples += delta;
 
-	/* Make sure this stays in sync with _hash_expandtable() */
-	do_expand = metap->hashm_ntuples >
-		(double) metap->hashm_ffactor * (metap->hashm_maxbucket + 1);
+		/* Make sure this stays in sync with _hash_expandtable() */
+		do_expand = metap->hashm_ntuples >
+			(double) metap->hashm_ffactor * (metap->hashm_maxbucket + 1);
 
-	MarkBufferDirty(metabuf);
+		MarkBufferDirty(metabuf);
+	}
 
 	/* XLOG stuff */
 	if (RelationNeedsWAL(rel))
@@ -223,7 +268,11 @@ restart_insert:
 		XLogBeginInsert();
 		XLogRegisterData(&xlrec, SizeOfHashInsert);
 
-		XLogRegisterBuffer(1, metabuf, REGBUF_STANDARD);
+		if (flush_count)
+		{
+			XLogRegisterBuffer(1, metabuf, REGBUF_STANDARD);
+			XLogRegisterBufData(1, &delta, sizeof(delta));
+		}
 
 		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
 		XLogRegisterBufData(0, itup, IndexTupleSize(itup));
@@ -234,12 +283,14 @@ restart_insert:
 		recptr = XLogGetFakeLSN(rel);
 
 	PageSetLSN(BufferGetPage(buf), recptr);
-	PageSetLSN(BufferGetPage(metabuf), recptr);
+	if (flush_count)
+		PageSetLSN(BufferGetPage(metabuf), recptr);
 
 	END_CRIT_SECTION();
 
 	/* drop lock on metapage, but keep pin */
-	LockBuffer(metabuf, BUFFER_LOCK_UNLOCK);
+	if (flush_count)
+		LockBuffer(metabuf, BUFFER_LOCK_UNLOCK);
 
 	/*
 	 * Release the modified page and ensure to release the pin on primary
