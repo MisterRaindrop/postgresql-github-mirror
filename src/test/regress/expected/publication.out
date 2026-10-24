@@ -1160,11 +1160,24 @@ DROP TABLE testpub_tbl5d;
 -- tests with REPLICA IDENTITY FULL
 CREATE TABLE testpub_tbl6 (a int, b text, c text);
 ALTER TABLE testpub_tbl6 REPLICA IDENTITY FULL;
+-- fail: with REPLICA IDENTITY FULL no column list is allowed
 ALTER PUBLICATION testpub_fortable ADD TABLE testpub_tbl6 (a, b, c);
-UPDATE testpub_tbl6 SET a = 1;
-ERROR:  cannot update table "testpub_tbl6"
-DETAIL:  Column list used by the publication does not cover the replica identity.
-ALTER PUBLICATION testpub_fortable DROP TABLE testpub_tbl6;
+ERROR:  cannot use column list for relation "public.testpub_tbl6" in publication "testpub_fortable"
+DETAIL:  Column lists cannot be specified for tables with REPLICA IDENTITY FULL when publishing updates or deletes.
+HINT:  Either change the table's REPLICA IDENTITY or configure the publication to publish only 'insert'.
+-- fail: cannot CREATE PUBLICATION with column list for REPLICA IDENTITY FULL table
+CREATE PUBLICATION testpub_full_col FOR TABLE testpub_tbl6 (a, b);
+ERROR:  cannot use column list for relation "public.testpub_tbl6" in publication "testpub_full_col"
+DETAIL:  Column lists cannot be specified for tables with REPLICA IDENTITY FULL when publishing updates or deletes.
+HINT:  Either change the table's REPLICA IDENTITY or configure the publication to publish only 'insert'.
+-- ok: insert-only publication allows column list for REPLICA IDENTITY FULL table
+CREATE PUBLICATION testpub_full_col_ins FOR TABLE testpub_tbl6 (a, b) WITH (publish = 'insert');
+-- fail: cannot change publish actions to include update/delete when column list exists on FULL table
+ALTER PUBLICATION testpub_full_col_ins SET (publish = 'insert, update');
+ERROR:  cannot publish updates or deletes for publication "testpub_full_col_ins"
+DETAIL:  Table "testpub_tbl6" has a column list and REPLICA IDENTITY FULL.
+HINT:  Either change the table's REPLICA IDENTITY or remove the column list.
+DROP PUBLICATION testpub_full_col_ins;
 ALTER PUBLICATION testpub_fortable ADD TABLE testpub_tbl6; -- ok
 UPDATE testpub_tbl6 SET a = 1;
 -- make sure changing the column list is propagated to the catalog
@@ -1394,16 +1407,16 @@ HINT:  To enable updating the table, set REPLICA IDENTITY using ALTER TABLE.
 -- Case 2. REPLICA IDENTITY FULL
 ALTER TABLE rf_tbl_abcd_pk REPLICA IDENTITY FULL;
 ALTER TABLE rf_tbl_abcd_nopk REPLICA IDENTITY FULL;
+-- fail - with REPLICA IDENTITY FULL no column list is allowed
 ALTER PUBLICATION testpub6 SET TABLE rf_tbl_abcd_pk (c);
+ERROR:  cannot use column list for relation "public.rf_tbl_abcd_pk" in publication "testpub6"
+DETAIL:  Column lists cannot be specified for tables with REPLICA IDENTITY FULL when publishing updates or deletes.
+HINT:  Either change the table's REPLICA IDENTITY or configure the publication to publish only 'insert'.
 -- fail - with REPLICA IDENTITY FULL no column list is allowed
-UPDATE rf_tbl_abcd_pk SET a = 1;
-ERROR:  cannot update table "rf_tbl_abcd_pk"
-DETAIL:  Column list used by the publication does not cover the replica identity.
 ALTER PUBLICATION testpub6 SET TABLE rf_tbl_abcd_nopk (a, b, c, d);
--- fail - with REPLICA IDENTITY FULL no column list is allowed
-UPDATE rf_tbl_abcd_nopk SET a = 1;
-ERROR:  cannot update table "rf_tbl_abcd_nopk"
-DETAIL:  Column list used by the publication does not cover the replica identity.
+ERROR:  cannot use column list for relation "public.rf_tbl_abcd_nopk" in publication "testpub6"
+DETAIL:  Column lists cannot be specified for tables with REPLICA IDENTITY FULL when publishing updates or deletes.
+HINT:  Either change the table's REPLICA IDENTITY or configure the publication to publish only 'insert'.
 -- Case 3. REPLICA IDENTITY NOTHING
 ALTER TABLE rf_tbl_abcd_pk REPLICA IDENTITY NOTHING;
 ALTER TABLE rf_tbl_abcd_nopk REPLICA IDENTITY NOTHING;
