@@ -586,6 +586,39 @@ SKIP:
 # And drop it, so we can continue
 $oldnode->start;
 $oldnode->safe_psql('postgres', 'DROP DATABASE regression_invalid');
+
+# Store a role setting that the new cluster doesn't know, which would make
+# the restore fail.  The old cluster wouldn't accept it either, so insert it
+# directly.
+$oldnode->safe_psql(
+	'postgres', qq(
+  CREATE ROLE regress_upgrade_setting;
+  INSERT INTO pg_db_role_setting
+    SELECT 0, oid, '{no_such_setting=on}' FROM pg_roles
+    WHERE rolname = 'regress_upgrade_setting';
+));
+$oldnode->stop;
+
+command_checks_all(
+	[
+		'pg_upgrade', '--no-sync',
+		'--old-datadir' => $oldnode->data_dir,
+		'--new-datadir' => $newnode->data_dir,
+		'--old-bindir' => $oldbindir,
+		'--new-bindir' => $newbindir,
+		'--socketdir' => $newnode->host,
+		'--old-port' => $oldnode->port,
+		'--new-port' => $newnode->port,
+		$mode, '--check',
+	],
+	1,
+	[qr/settings for some roles, databases, or functions/],
+	[qr/^$/],
+	'stored setting unknown to the new cluster causes failure');
+rmtree($newnode->data_dir . "/pg_upgrade_output.d");
+
+$oldnode->start;
+$oldnode->safe_psql('postgres', 'DROP ROLE regress_upgrade_setting');
 $oldnode->stop;
 
 # --check command works here, cleans up pg_upgrade_output.d.
