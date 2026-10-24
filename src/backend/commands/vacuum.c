@@ -378,15 +378,17 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("ONLY_DATABASE_STATS cannot be specified with a list of tables")));
-		/* don't require people to turn off PROCESS_TOAST/MAIN explicitly */
-		if (params.options & ~(VACOPT_VACUUM |
-							   VACOPT_VERBOSE |
-							   VACOPT_PROCESS_MAIN |
-							   VACOPT_PROCESS_TOAST |
-							   VACOPT_ONLY_DATABASE_STATS))
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("ONLY_DATABASE_STATS cannot be specified with other VACUUM options")));
+		/* only VERBOSE may be specified alongside ONLY_DATABASE_STATS */
+		foreach(lc, vacstmt->options)
+		{
+			DefElem    *opt = lfirst_node(DefElem, lc);
+
+			if (strcmp(opt->defname, "verbose") != 0 &&
+				strcmp(opt->defname, "only_database_stats") != 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("ONLY_DATABASE_STATS cannot be specified with other VACUUM options")));
+		}
 	}
 
 	/*
