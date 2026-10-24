@@ -3625,9 +3625,16 @@ retry:
 				 &errinfo))
 		WALReadRaiseError(&errinfo);
 
-	/* See logical_read_xlog_page(). */
-	XLByteToSeg(startptr, segno, xlogreader->segcxt.ws_segsize);
-	CheckXLogRemoved(segno, xlogreader->seg.ws_tli);
+	/*
+	 * Check that the segment read from disk was not recycled while we were
+	 * reading it. See logical_read_xlog_page(). WALReadFromBuffers() validates
+	 * its own reads, which need not have corresponding files in pg_wal.
+	 */
+	if (nbytes > 0)
+	{
+		XLByteToSeg(startptr, segno, xlogreader->segcxt.ws_segsize);
+		CheckXLogRemoved(segno, xlogreader->seg.ws_tli);
+	}
 
 	/*
 	 * During recovery, the currently-open WAL file might be replaced with the
