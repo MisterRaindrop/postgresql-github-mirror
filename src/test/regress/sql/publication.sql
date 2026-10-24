@@ -682,9 +682,18 @@ DROP TABLE testpub_tbl5d;
 CREATE TABLE testpub_tbl6 (a int, b text, c text);
 ALTER TABLE testpub_tbl6 REPLICA IDENTITY FULL;
 
+-- fail: with REPLICA IDENTITY FULL no column list is allowed
 ALTER PUBLICATION testpub_fortable ADD TABLE testpub_tbl6 (a, b, c);
-UPDATE testpub_tbl6 SET a = 1;
-ALTER PUBLICATION testpub_fortable DROP TABLE testpub_tbl6;
+
+-- fail: cannot CREATE PUBLICATION with column list for REPLICA IDENTITY FULL table
+CREATE PUBLICATION testpub_full_col FOR TABLE testpub_tbl6 (a, b);
+
+-- ok: insert-only publication allows column list for REPLICA IDENTITY FULL table
+CREATE PUBLICATION testpub_full_col_ins FOR TABLE testpub_tbl6 (a, b) WITH (publish = 'insert');
+
+-- fail: cannot change publish actions to include update/delete when column list exists on FULL table
+ALTER PUBLICATION testpub_full_col_ins SET (publish = 'insert, update');
+DROP PUBLICATION testpub_full_col_ins;
 
 ALTER PUBLICATION testpub_fortable ADD TABLE testpub_tbl6; -- ok
 UPDATE testpub_tbl6 SET a = 1;
@@ -849,12 +858,10 @@ UPDATE rf_tbl_abcd_nopk SET a = 1;
 -- Case 2. REPLICA IDENTITY FULL
 ALTER TABLE rf_tbl_abcd_pk REPLICA IDENTITY FULL;
 ALTER TABLE rf_tbl_abcd_nopk REPLICA IDENTITY FULL;
+-- fail - with REPLICA IDENTITY FULL no column list is allowed
 ALTER PUBLICATION testpub6 SET TABLE rf_tbl_abcd_pk (c);
 -- fail - with REPLICA IDENTITY FULL no column list is allowed
-UPDATE rf_tbl_abcd_pk SET a = 1;
 ALTER PUBLICATION testpub6 SET TABLE rf_tbl_abcd_nopk (a, b, c, d);
--- fail - with REPLICA IDENTITY FULL no column list is allowed
-UPDATE rf_tbl_abcd_nopk SET a = 1;
 
 -- Case 3. REPLICA IDENTITY NOTHING
 ALTER TABLE rf_tbl_abcd_pk REPLICA IDENTITY NOTHING;

@@ -780,10 +780,12 @@ TransformPubWhereClauses(List *tables, const char *queryString,
  * 'publish_schema' indicates that the publication contains any TABLES IN
  * SCHEMA elements (newly added in this command, or preexisting).
  * 'pubviaroot' is the value of publish_via_partition_root.
+ * 'pubupdate' and 'pubdelete' indicate whether UPDATE or DELETE actions are published.
  */
 static void
 CheckPubRelationColumnList(char *pubname, List *tables,
-						   bool publish_schema, bool pubviaroot)
+						   bool publish_schema, bool pubviaroot,
+						   bool pubupdate, bool pubdelete)
 {
 	ListCell   *lc;
 
@@ -826,6 +828,20 @@ CheckPubRelationColumnList(char *pubname, List *tables,
 							RelationGetRelationName(pri->relation), pubname),
 					 errdetail("Column lists cannot be specified for partitioned tables when %s is false.",
 							   "publish_via_partition_root")));
+
+		/*
+		 * Disallow specifying column list if the table has REPLICA IDENTITY
+		 * FULL and the publication publishes UPDATE or DELETE.
+		 */
+		if ((pubupdate || pubdelete) &&
+			pri->relation->rd_rel->relreplident == REPLICA_IDENTITY_FULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("cannot use column list for relation \"%s.%s\" in publication \"%s\"",
+							get_namespace_name(RelationGetNamespace(pri->relation)),
+							RelationGetRelationName(pri->relation), pubname),
+					 errdetail("Column lists cannot be specified for tables with REPLICA IDENTITY FULL when publishing updates or deletes."),
+					 errhint("Either change the table's REPLICA IDENTITY or configure the publication to publish only 'insert'.")));
 	}
 }
 
@@ -975,7 +991,9 @@ CreatePublication(ParseState *pstate, CreatePublicationStmt *stmt)
 
 			CheckPubRelationColumnList(stmt->pubname, rels,
 									   schemaidlist != NIL,
-									   publish_via_partition_root);
+									   publish_via_partition_root,
+									   pubactions.pubupdate,
+									   pubactions.pubdelete);
 
 			PublicationAddTables(puboid, rels, true, NULL);
 			CloseTableList(rels);
@@ -1128,6 +1146,54 @@ AlterPublicationOptions(ParseState *pstate, AlterPublicationStmt *stmt,
 		}
 	}
 
+	/*
+	 * Disallow publishing UPDATE or DELETE if the publication contains any
+	 * table with a column list and REPLICA IDENTITY FULL.
+	 */
+	if (!pubform->puballtables && publish_given &&
+		(pubactions.pubupdate || pubactions.pubdelete))
+	{
+		List	   *relids = GetIncludedPublicationRelations(pubform->oid,
+															 PUBLICATION_PART_ROOT);
+
+		foreach(lc, relids)
+		{
+			Oid			relid = lfirst_oid(lc);
+			HeapTuple	rftuple;
+			bool		has_collist;
+			Relation	targetrel;
+
+			rftuple = SearchSysCache2(PUBLICATIONRELMAP,
+									  ObjectIdGetDatum(relid),
+									  ObjectIdGetDatum(pubform->oid));
+			if (!HeapTupleIsValid(rftuple))
+				continue;
+			has_collist = !heap_attisnull(rftuple, Anum_pg_publication_rel_prattrs, NULL);
+			ReleaseSysCache(rftuple);
+
+			if (!has_collist)
+				continue;
+
+			targetrel = table_open(relid, AccessShareLock);
+			if (targetrel->rd_rel->relreplident == REPLICA_IDENTITY_FULL)
+			{
+				char	   *relname = pstrdup(RelationGetRelationName(targetrel));
+
+				table_close(targetrel, AccessShareLock);
+				list_free(relids);
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("cannot publish updates or deletes for publication \"%s\"",
+								stmt->pubname),
+						 errdetail("Table \"%s\" has a column list and REPLICA IDENTITY FULL.",
+								   relname),
+						 errhint("Either change the table's REPLICA IDENTITY or remove the column list.")));
+			}
+			table_close(targetrel, AccessShareLock);
+		}
+		list_free(relids);
+	}
+
 	/* Everything ok, form a new tuple. */
 	memset(values, 0, sizeof(values));
 	memset(nulls, false, sizeof(nulls));
@@ -1264,7 +1330,9 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 		publish_schema |= is_schema_publication(pubid);
 
 		CheckPubRelationColumnList(stmt->pubname, rels, publish_schema,
-								   pubform->pubviaroot);
+								   pubform->pubviaroot,
+								   pubform->pubupdate,
+								   pubform->pubdelete);
 
 		PublicationAddTables(pubid, rels, false, stmt);
 	}
@@ -1301,7 +1369,9 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 			TransformPubWhereClauses(rels, queryString, pubform->pubviaroot);
 
 			CheckPubRelationColumnList(stmt->pubname, rels, publish_schema,
-									   pubform->pubviaroot);
+									   pubform->pubviaroot,
+									   pubform->pubupdate,
+									   pubform->pubdelete);
 		}
 
 		/*
