@@ -32,6 +32,7 @@
 #include "catalog/pg_control.h"
 #include "catalog/storage_xlog.h"
 #include "commands/dbcommands_xlog.h"
+#include "common/hashfn.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "port/atomics.h"
@@ -53,10 +54,10 @@
 #define XLOGPREFETCHER_STATS_DISTANCE BLCKSZ
 
 /*
- * To detect repeated access to the same block and skip useless extra system
- * calls, we remember a small window of recently prefetched blocks.
+ * Size of the direct-mapped table of recently seen blocks.  A collision
+ * between live entries only costs a repeated prefetch.
  */
-#define XLOGPREFETCHER_SEQ_WINDOW_SIZE 4
+#define XLOGPREFETCHER_RECENT_BLOCKS 4096
 
 /*
  * When maintenance_io_concurrency is not saturated, we're prepared to look
@@ -120,6 +121,14 @@ typedef struct LsnReadQueue
 	}			queue[FLEXIBLE_ARRAY_MEMBER];
 } LsnReadQueue;
 
+/* A recently seen block, and the LSN of the record that referenced it. */
+typedef struct XLogPrefetcherRecentBlock
+{
+	RelFileLocator rlocator;
+	BlockNumber blkno;
+	XLogRecPtr	lsn;
+} XLogPrefetcherRecentBlock;
+
 /*
  * A prefetcher.  This is a mechanism that wraps an XLogReader, prefetching
  * blocks that will be soon be referenced, to try to avoid IO stalls.
@@ -139,9 +148,7 @@ struct XLogPrefetcher
 	dlist_head	filter_queue;
 
 	/* Book-keeping to avoid repeat prefetches. */
-	RelFileLocator recent_rlocator[XLOGPREFETCHER_SEQ_WINDOW_SIZE];
-	BlockNumber recent_block[XLOGPREFETCHER_SEQ_WINDOW_SIZE];
-	int			recent_idx;
+	XLogPrefetcherRecentBlock recent_blocks[XLOGPREFETCHER_RECENT_BLOCKS];
 
 	/* Book-keeping to disable prefetching temporarily. */
 	XLogRecPtr	no_readahead_until;
@@ -196,6 +203,14 @@ static inline bool XLogPrefetcherIsFiltered(XLogPrefetcher *prefetcher,
 											BlockNumber blockno);
 static inline void XLogPrefetcherCompleteFilters(XLogPrefetcher *prefetcher,
 												 XLogRecPtr replaying_lsn);
+static inline void XLogPrefetcherAddRecent(XLogPrefetcher *prefetcher,
+										   RelFileLocator rlocator,
+										   BlockNumber blockno,
+										   XLogRecPtr lsn);
+static inline bool XLogPrefetcherIsRecent(XLogPrefetcher *prefetcher,
+										  RelFileLocator rlocator,
+										  BlockNumber blockno,
+										  XLogRecPtr replaying_lsn);
 static LsnReadQueueNextStatus XLogPrefetcherNextBlock(uintptr_t pgsr_private,
 													  XLogRecPtr *lsn);
 
@@ -673,6 +688,25 @@ XLogPrefetcherNextBlock(uintptr_t pgsr_private, XLogRecPtr *lsn)
 			}
 
 			/*
+			 * There is no point in repeatedly prefetching the same block.
+			 * This comes before the FPI and WILL_INIT checks below, so that
+			 * the blocks they skip are remembered too.
+			 */
+			if (XLogPrefetcherIsRecent(prefetcher, block->rlocator, block->blkno,
+									   replaying_lsn))
+			{
+				/*
+				 * XXX If we also remembered where it was, we could set
+				 * recent_buffer so that recovery could skip smgropen() and a
+				 * buffer table lookup.
+				 */
+				XLogPrefetchIncrement(&SharedStats->skip_rep);
+				return LRQ_NEXT_NO_IO;
+			}
+			XLogPrefetcherAddRecent(prefetcher, block->rlocator, block->blkno,
+									record->lsn);
+
+			/*
 			 * If there is a full page image attached, we won't be reading the
 			 * page, so don't bother trying to prefetch.
 			 */
@@ -695,26 +729,6 @@ XLogPrefetcherNextBlock(uintptr_t pgsr_private, XLogRecPtr *lsn)
 				XLogPrefetchIncrement(&SharedStats->skip_new);
 				return LRQ_NEXT_NO_IO;
 			}
-
-			/* There is no point in repeatedly prefetching the same block. */
-			for (int i = 0; i < XLOGPREFETCHER_SEQ_WINDOW_SIZE; ++i)
-			{
-				if (block->blkno == prefetcher->recent_block[i] &&
-					RelFileLocatorEquals(block->rlocator, prefetcher->recent_rlocator[i]))
-				{
-					/*
-					 * XXX If we also remembered where it was, we could set
-					 * recent_buffer so that recovery could skip smgropen()
-					 * and a buffer table lookup.
-					 */
-					XLogPrefetchIncrement(&SharedStats->skip_rep);
-					return LRQ_NEXT_NO_IO;
-				}
-			}
-			prefetcher->recent_rlocator[prefetcher->recent_idx] = block->rlocator;
-			prefetcher->recent_block[prefetcher->recent_idx] = block->blkno;
-			prefetcher->recent_idx =
-				(prefetcher->recent_idx + 1) % XLOGPREFETCHER_SEQ_WINDOW_SIZE;
 
 			/*
 			 * We could try to have a fast path for repeated references to the
@@ -911,6 +925,49 @@ XLogPrefetcherCompleteFilters(XLogPrefetcher *prefetcher, XLogRecPtr replaying_l
 		dlist_delete(&filter->link);
 		hash_search(prefetcher->filter_table, filter, HASH_REMOVE, NULL);
 	}
+}
+
+/* Find the slot for a given block. */
+static inline XLogPrefetcherRecentBlock *
+XLogPrefetcherRecentSlot(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
+						 BlockNumber blockno)
+{
+	uint32		hash;
+
+	hash = hash_combine(hash_bytes((const unsigned char *) &rlocator,
+								   sizeof(rlocator)),
+						hash_bytes_uint32(blockno));
+	return &prefetcher->recent_blocks[hash % XLOGPREFETCHER_RECENT_BLOCKS];
+}
+
+/* Remember that the record at 'lsn' references a given block. */
+static inline void
+XLogPrefetcherAddRecent(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
+						BlockNumber blockno, XLogRecPtr lsn)
+{
+	XLogPrefetcherRecentBlock *recent;
+
+	recent = XLogPrefetcherRecentSlot(prefetcher, rlocator, blockno);
+	recent->rlocator = rlocator;
+	recent->blkno = blockno;
+	recent->lsn = lsn;
+}
+
+/*
+ * Check if a given block was already referenced by a record that hasn't been
+ * replayed yet.  Stale entries are just left to be overwritten.
+ */
+static inline bool
+XLogPrefetcherIsRecent(XLogPrefetcher *prefetcher, RelFileLocator rlocator,
+					   BlockNumber blockno, XLogRecPtr replaying_lsn)
+{
+	XLogPrefetcherRecentBlock *recent;
+
+	recent = XLogPrefetcherRecentSlot(prefetcher, rlocator, blockno);
+	return XLogRecPtrIsValid(recent->lsn) &&
+		recent->lsn >= replaying_lsn &&
+		recent->blkno == blockno &&
+		RelFileLocatorEquals(recent->rlocator, rlocator);
 }
 
 /*
