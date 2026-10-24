@@ -1838,10 +1838,10 @@ remove_self_joins_one_group(PlannerInfo *root, Relids relids)
 				continue;
 
 			/*
-			 * Check Row Marks equivalence. We can't remove the join if the
-			 * relations have row marks of different strength (e.g., one is
-			 * locked FOR UPDATE, and another just has ROW_MARK_REFERENCE for
-			 * EvalPlanQual rechecking).
+			 * Check row mark equivalence.  If both relations have row marks,
+			 * their mark type, locking strength, and wait policy must match.
+			 * Otherwise, discarding the removed relation's row mark could change
+			 * tuple-locking or EvalPlanQual behavior.
 			 */
 			foreach(lc, root->rowMarks)
 			{
@@ -1861,7 +1861,10 @@ remove_self_joins_one_group(PlannerInfo *root, Relids relids)
 				if (kmark && rmark)
 					break;
 			}
-			if (kmark && rmark && kmark->markType != rmark->markType)
+			if (kmark && rmark &&
+				(kmark->markType != rmark->markType ||
+				 kmark->strength != rmark->strength ||
+				 kmark->waitPolicy != rmark->waitPolicy))
 				continue;
 
 			/*
