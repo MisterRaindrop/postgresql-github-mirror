@@ -1274,26 +1274,94 @@ remove_self_join_rel(PlannerInfo *root,
 	Assert(found_relid);
 
 	/*
-	 * If the removed relation has a row mark, transfer it to the remaining
-	 * one.
+	 * If the removed relation has a row mark, we must get rid of it, making
+	 * sure that the kept relation has at least as strong a mark.  (We assume
+	 * it's okay to just adjust root->rowMarks; the planner won't consult the
+	 * source list root->parse->rowMarks again.)
 	 *
-	 * If both rels have row marks, just keep the one corresponding to the
-	 * remaining relation because we verified earlier that they have the same
-	 * strength.
+	 * remove_self_joins_one_group() already rejected cases in which one rel
+	 * has a locking rowmark and the other doesn't.  But here we must handle
+	 * cases where two different locking strengths were given.  It's okay to
+	 * retain only the stronger lock strength, because the results will match
+	 * what would have happened if we didn't do SJE and the scan requiring the
+	 * stronger lock reached each tuple first.  (We do not want to consider
+	 * the possibility that the scan requiring the weaker lock reaches a tuple
+	 * first, because implementing the query like that would risk lock-upgrade
+	 * deadlock errors.)  We keep the waitPolicy associated with that lock
+	 * strength too, since if it is LockWaitError we should error out on
+	 * non-lockable rows, while if it is LockWaitSkip then non-lockable rows
+	 * would be dropped from the equijoin result anyway, and if it is
+	 * LockWaitBlock then we will wait to acquire the row lock and then the
+	 * second scan would have accepted the row as already locked.
+	 *
+	 * If we merge two rowmarks with equal strength, take the Max() of their
+	 * waitPolicies, corresponding to what the parser's applyLockingClause()
+	 * does and with the same reasoning.
+	 *
+	 * Unlike applyLockingClause(), we don't take the Max() of waitPolicies
+	 * associated with different lock strengths.  That's a bit debatable
+	 * perhaps, but it is not our job here to make semantic policy decisions.
+	 * We should just implement what the parser tells us, to the best of our
+	 * ability.
+	 *
+	 * Note: this code is dependent on the merged rels not being foreign
+	 * tables.  If they were, we couldn't be sure to clean up what the FDW
+	 * might have done in response to GetForeignRowMarkType calls; plus the
+	 * markType might depend on factors we aren't accounting for.
+	 *
+	 * Nothing to do if there's no rmark; kmark, if any, is fine (it must be a
+	 * non-locking mark).
 	 */
 	if (rmark)
 	{
+		/* Shouldn't have inheritance children yet */
+		Assert(rmark->rti == rmark->prti);
+		Assert(!rmark->isParent);
+
 		if (kmark)
 		{
-			Assert(kmark->markType == rmark->markType);
+			Assert(kmark->rti == kmark->prti);
+			Assert(!kmark->isParent);
 
+			/*
+			 * Since SJE only considers regular tables (not foreign tables),
+			 * we don't expect to see ROW_MARK_COPY marks.  It's important to
+			 * check this since the associated row-identity Vars in the tlist
+			 * are different for COPY marks.
+			 */
+			Assert(kmark->markType != ROW_MARK_COPY);
+			Assert(rmark->markType != ROW_MARK_COPY);
+
+			/* Merge the lock strengths and waitPolicies as described above */
+			if (rmark->strength > kmark->strength)
+			{
+				kmark->strength = rmark->strength;
+				/* copy fields derived from strength */
+				kmark->markType = rmark->markType;
+				kmark->allMarkTypes = rmark->allMarkTypes;
+				/* adopt rmark's waitPolicy too */
+				kmark->waitPolicy = rmark->waitPolicy;
+			}
+			else if (rmark->strength == kmark->strength)
+			{
+				/* adopt the greater waitPolicy */
+				kmark->waitPolicy = Max(kmark->waitPolicy, rmark->waitPolicy);
+			}
+
+			/*
+			 * Now drop the rmark from root->rowMarks.  Ideally we'd also get
+			 * rid of the rmark's associated row-identity Var in the tlist.
+			 * But that's just a ctid, so it doesn't seem worth the trouble.
+			 */
 			root->rowMarks = list_delete_ptr(root->rowMarks, rmark);
 		}
 		else
 		{
-			/* Shouldn't have inheritance children yet. */
-			Assert(rmark->rti == rmark->prti);
-
+			/*
+			 * Just relabel rmark to attach it to the kept rel.  The
+			 * associated tlist row-identity Var's varno will get renumbered
+			 * through normal processing, so we needn't touch it here.
+			 */
 			rmark->rti = rmark->prti = toKeep->relid;
 		}
 	}
@@ -1838,10 +1906,15 @@ remove_self_joins_one_group(PlannerInfo *root, Relids relids)
 				continue;
 
 			/*
-			 * Check Row Marks equivalence. We can't remove the join if the
-			 * relations have row marks of different strength (e.g., one is
-			 * locked FOR UPDATE, and another just has ROW_MARK_REFERENCE for
-			 * EvalPlanQual rechecking).
+			 * If one or both rels have rowmarks, we cannot remove the join
+			 * unless the rowmarks have similar semantics.  In particular, an
+			 * RTE with a locking rowmark potentially represents a different
+			 * set of row values than an RTE that doesn't have one.
+			 *
+			 * So first, search the rowMarks list for relevant PlanRowMarks.
+			 * There should be no more than one for each RTI; we make an
+			 * incomplete Assert check for that.  kmark will be for the kept
+			 * rel, rmark for the removed one.
 			 */
 			foreach(lc, root->rowMarks)
 			{
@@ -1861,8 +1934,25 @@ remove_self_joins_one_group(PlannerInfo *root, Relids relids)
 				if (kmark && rmark)
 					break;
 			}
-			if (kmark && rmark && kmark->markType != rmark->markType)
-				continue;
+			if (kmark && rmark)
+			{
+				/* Can't merge if only one mark implies row locking */
+				if (RowMarkRequiresRowShareLock(kmark->markType) !=
+					RowMarkRequiresRowShareLock(rmark->markType))
+					continue;
+			}
+			else if (kmark)
+			{
+				/* Can only merge if single mark is non-locking */
+				if (RowMarkRequiresRowShareLock(kmark->markType))
+					continue;
+			}
+			else if (rmark)
+			{
+				/* Can only merge if single mark is non-locking */
+				if (RowMarkRequiresRowShareLock(rmark->markType))
+					continue;
+			}
 
 			/*
 			 * We only deal with base rels here, so their relids bitset
