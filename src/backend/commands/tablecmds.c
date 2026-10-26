@@ -529,6 +529,7 @@ static void set_attnotnull(List **wqueue, Relation rel, AttrNumber attnum,
 static ObjectAddress ATExecSetNotNull(List **wqueue, Relation rel,
 									  char *conName, char *colName,
 									  bool recurse, bool recursing,
+									  bool parent_validated,
 									  LOCKMODE lockmode);
 static bool NotNullImpliedByRelConstraints(Relation rel, Form_pg_attribute attr);
 static bool ConstraintImpliedByRelConstraint(Relation scanrel,
@@ -5483,7 +5484,7 @@ ATExecCmd(List **wqueue, AlteredTableInfo *tab,
 			break;
 		case AT_SetNotNull:		/* ALTER COLUMN SET NOT NULL */
 			address = ATExecSetNotNull(wqueue, rel, NULL, cmd->name,
-									   cmd->recurse, false, lockmode);
+									   cmd->recurse, false, true, lockmode);
 			break;
 		case AT_SetExpression:
 			address = ATExecSetExpression(tab, rel, cmd->name, cmd->def, lockmode);
@@ -7993,10 +7994,19 @@ set_attnotnull(List **wqueue, Relation rel, AttrNumber attnum,
  *
  * We must recurse to child tables during execution, rather than using
  * ALTER TABLE's normal prep-time recursion.
+ *
+ * When recursing, parent_validated tells whether the constraint being
+ * propagated from the parent is validated.  A validated constraint on the
+ * parent guarantees that no row of any descendant is null, so it cannot be
+ * merged with an existing NOT VALID constraint on a child.  If the child has
+ * no constraint, the one created for it is NOT VALID when the parent's is,
+ * like ADD CONSTRAINT ... NOT VALID does, and its own validity is what gets
+ * passed down in turn.  parent_validated is not used at top level.
  */
 static ObjectAddress
 ATExecSetNotNull(List **wqueue, Relation rel, char *conName, char *colName,
-				 bool recurse, bool recursing, LOCKMODE lockmode)
+				 bool recurse, bool recursing, bool parent_validated,
+				 LOCKMODE lockmode)
 {
 	HeapTuple	tuple;
 	AttrNumber	attnum;
@@ -8055,6 +8065,20 @@ ATExecSetNotNull(List **wqueue, Relation rel, char *conName, char *colName,
 		 */
 		if (recursing)
 		{
+			/*
+			 * Throw an error if the existing constraint is NOT VALID but the
+			 * parent's constraint is validated; this is the same rule that
+			 * AdjustNotNullInheritance applies for ADD CONSTRAINT.
+			 */
+			if (parent_validated && !conForm->convalidated)
+				ereport(ERROR,
+						errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						errmsg("incompatible NOT VALID constraint \"%s\" on relation \"%s\"",
+							   NameStr(conForm->conname),
+							   RelationGetRelationName(rel)),
+						errhint("You might need to validate it using %s.",
+								"ALTER TABLE ... VALIDATE CONSTRAINT"));
+
 			if (pg_add_s16_overflow(conForm->coninhcount, 1,
 									&conForm->coninhcount))
 				ereport(ERROR,
@@ -8067,15 +8091,6 @@ ATExecSetNotNull(List **wqueue, Relation rel, char *conName, char *colName,
 			conForm->conislocal = true;
 			changed = true;
 		}
-		else if (!conForm->convalidated)
-		{
-			/*
-			 * Flip attnotnull and convalidated, and also validate the
-			 * constraint.
-			 */
-			return ATExecValidateConstraint(wqueue, rel, NameStr(conForm->conname),
-											recurse, recursing, lockmode);
-		}
 
 		if (changed)
 		{
@@ -8086,6 +8101,22 @@ ATExecSetNotNull(List **wqueue, Relation rel, char *conName, char *colName,
 			CatalogTupleUpdate(constr_rel, &tuple->t_self, tuple);
 			ObjectAddressSet(address, ConstraintRelationId, conForm->oid);
 			table_close(constr_rel, RowExclusiveLock);
+		}
+
+		/*
+		 * If the constraint is NOT VALID, SET NOT NULL on the target table
+		 * validates it, whether or not it was just made local above.
+		 * Validation reads the constraint again and rewrites it, so make our
+		 * own update visible first.
+		 */
+		if (!recursing && !conForm->convalidated)
+		{
+			if (changed)
+				CommandCounterIncrement();
+
+			/* Flip attnotnull and convalidated, and validate the constraint */
+			return ATExecValidateConstraint(wqueue, rel, NameStr(conForm->conname),
+											recurse, recursing, lockmode);
 		}
 
 		if (changed)
@@ -8129,14 +8160,27 @@ ATExecSetNotNull(List **wqueue, Relation rel, char *conName, char *colName,
 	constraint->is_no_inherit = is_no_inherit;
 	constraint->conname = conName;
 
+	/*
+	 * A constraint inherited from a NOT VALID one cannot be validated either,
+	 * since we don't scan for it here; create it NOT VALID too.
+	 */
+	if (recursing && !parent_validated)
+	{
+		constraint->skip_validation = true;
+		constraint->initially_valid = false;
+	}
+
 	/* and do it */
 	cooked = AddRelationNewConstraints(rel, NIL, list_make1(constraint),
 									   false, !recursing, false, NULL);
 	ccon = linitial(cooked);
 	ObjectAddressSet(address, ConstraintRelationId, ccon->conoid);
 
-	/* Mark pg_attribute.attnotnull for the column and queue validation */
-	set_attnotnull(wqueue, rel, attnum, true);
+	/*
+	 * Mark pg_attribute.attnotnull for the column, and queue validation if
+	 * the constraint is valid.
+	 */
+	set_attnotnull(wqueue, rel, attnum, !constraint->skip_validation);
 
 	InvokeObjectPostAlterHook(RelationRelationId,
 							  RelationGetRelid(rel), attnum);
@@ -8158,7 +8202,8 @@ ATExecSetNotNull(List **wqueue, Relation rel, char *conName, char *colName,
 			CommandCounterIncrement();
 
 			ATExecSetNotNull(wqueue, childrel, conName, colName,
-							 recurse, true, lockmode);
+							 recurse, true, !constraint->skip_validation,
+							 lockmode);
 			table_close(childrel, NoLock);
 		}
 	}
@@ -13156,7 +13201,8 @@ ATExecAlterConstrInheritability(List **wqueue, ATAlterConstraint *cmdcon,
 			Relation	childrel = table_open(childoid, NoLock);
 
 			addr = ATExecSetNotNull(wqueue, childrel, NameStr(currcon->conname),
-									colName, true, true, lockmode);
+									colName, true, true, currcon->convalidated,
+									lockmode);
 			if (OidIsValid(addr.objectId))
 				CommandCounterIncrement();
 			table_close(childrel, NoLock);
