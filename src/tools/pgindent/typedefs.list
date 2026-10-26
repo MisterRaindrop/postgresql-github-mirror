@@ -3524,6 +3524,7 @@ XLogPageReadPrivate
 XLogPageReadResult
 XLogPrefetchStats
 XLogPrefetcher
+XLogPrefetcherFPI
 XLogPrefetcherFilter
 XLogReaderRoutine
 XLogReaderState
