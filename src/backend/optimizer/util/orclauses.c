@@ -103,7 +103,7 @@ extract_restriction_or_clauses(PlannerInfo *root)
 			RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
 
 			if (restriction_is_or_clause(rinfo) &&
-				join_clause_is_movable_to(rinfo, rel))
+				join_clause_is_movable_to(rinfo, rel, true))
 			{
 				/* Try to extract a qual for this rel only */
 				Expr	   *orclause = extract_or_clause(rinfo, rel);

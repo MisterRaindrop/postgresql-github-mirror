@@ -457,7 +457,7 @@ BuildParameterizedTidPaths(PlannerInfo *root, RelOptInfo *rel, List *clauses)
 		 * redundant when considering EC-derived clauses, but we must check it
 		 * for "loose" join clauses.
 		 */
-		if (!join_clause_is_movable_to(rinfo, rel))
+		if (!join_clause_is_movable_to(rinfo, rel, false))
 			continue;
 
 		/* OK, make list of clauses for this path */

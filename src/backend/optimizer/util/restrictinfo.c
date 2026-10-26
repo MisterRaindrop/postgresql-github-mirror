@@ -572,7 +572,9 @@ extract_actual_join_clauses(List *restrictinfo_list,
  * is sufficient.
  */
 bool
-join_clause_is_movable_to(RestrictInfo *rinfo, RelOptInfo *baserel)
+join_clause_is_movable_to(RestrictInfo *rinfo,
+							RelOptInfo *baserel,
+							bool lateral_referencers_allowed )
 {
 	/* Clause must physically reference target rel */
 	if (!bms_is_member(baserel->relid, rinfo->clause_relids))
@@ -596,7 +598,8 @@ join_clause_is_movable_to(RestrictInfo *rinfo, RelOptInfo *baserel)
 		return false;
 
 	/* Clause must not use any rels with LATERAL references to this rel */
-	if (bms_overlap(baserel->lateral_referencers, rinfo->clause_relids))
+	if (!lateral_referencers_allowed &&
+        bms_overlap(baserel->lateral_referencers, rinfo->clause_relids))
 		return false;
 
 	/* Ignore clones, too */
