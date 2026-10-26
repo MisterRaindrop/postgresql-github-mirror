@@ -122,8 +122,10 @@ hash_xlog_insert(XLogReaderState *record)
 	}
 	if (BufferIsValid(buffer))
 		UnlockReleaseBuffer(buffer);
+	buffer = InvalidBuffer;
 
-	if (XLogReadBufferForRedo(record, 1, &buffer) == BLK_NEEDS_REDO)
+	if (XLogRecHasBlockRef(record, 1) &&
+		XLogReadBufferForRedo(record, 1, &buffer) == BLK_NEEDS_REDO)
 	{
 		/*
 		 * Note: in normal operation, we'd update the metapage while still
@@ -133,7 +135,7 @@ hash_xlog_insert(XLogReaderState *record)
 		 */
 		page = BufferGetPage(buffer);
 		metap = HashPageGetMeta(page);
-		metap->hashm_ntuples += 1;
+		metap->hashm_ntuples += (double) xlrec->ntup_delta;
 
 		PageSetLSN(page, lsn);
 		MarkBufferDirty(buffer);

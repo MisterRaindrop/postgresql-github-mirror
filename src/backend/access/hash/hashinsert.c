@@ -22,6 +22,49 @@
 #include "storage/predicate.h"
 #include "utils/rel.h"
 
+/*
+ * Overflow-signal prototype (hash metapage contention).  Every insert used to
+ * exclusive-lock the metapage to bump hashm_ntuples and test the split
+ * threshold, serialising all inserters on one buffer.  Instead each backend
+ * accumulates a pending per-index count and only touches the metapage when an
+ * insert had to add an overflow page -- the local signal a bucket is
+ * over-full.  Then it flushes the pending count into hashm_ntuples (the
+ * metapage is already locked by _hash_addovflpage on that path) and asks for a
+ * split.  _hash_expandtable() re-checks the threshold, so a split that cannot
+ * relieve overflow (duplicate keys) is declined there.  The batched delta is
+ * carried in the insert WAL record so the standby advances hashm_ntuples in
+ * the same steps.  A pending count lost at backend exit is harmless:
+ * hashm_ntuples only drives split timing and VACUUM recomputes it.
+ */
+typedef struct HashPendingCount
+{
+	Oid			relid;
+	uint32		pending;
+} HashPendingCount;
+
+#define HASH_PENDING_SLOTS 64
+static HashPendingCount hash_pending[HASH_PENDING_SLOTS];
+
+static uint32 *
+hash_pending_slot(Oid relid)
+{
+	int			i;
+	int			free_slot = -1;
+
+	for (i = 0; i < HASH_PENDING_SLOTS; i++)
+	{
+		if (hash_pending[i].relid == relid)
+			return &hash_pending[i].pending;
+		if (free_slot < 0 && hash_pending[i].relid == InvalidOid)
+			free_slot = i;
+	}
+	if (free_slot < 0)
+		free_slot = (int) (relid % HASH_PENDING_SLOTS);
+	hash_pending[free_slot].relid = relid;
+	hash_pending[free_slot].pending = 0;
+	return &hash_pending[free_slot].pending;
+}
+
 static void _hash_vacuum_one_page(Relation rel, Relation hrel,
 								  Buffer metabuf, Buffer buf);
 
@@ -47,6 +90,8 @@ _hash_doinsert(Relation rel, IndexTuple itup, Relation heapRel, bool sorted)
 	HashPageOpaque pageopaque;
 	Size		itemsz;
 	bool		do_expand;
+	bool		added_ovfl = false;
+	uint32		ntup_delta = 0;
 	uint32		hashkey;
 	Bucket		bucket;
 	OffsetNumber itup_off;
@@ -181,6 +226,7 @@ restart_insert:
 			/* chain to a new overflow page */
 			buf = _hash_addovflpage(rel, metabuf, buf, (buf == bucket_buf));
 			page = BufferGetPage(buf);
+			added_ovfl = true;
 
 			/* should fit now, given test above */
 			Assert(PageGetFreeSpace(page) >= itemsz);
@@ -191,10 +237,15 @@ restart_insert:
 	}
 
 	/*
-	 * Write-lock the metapage so we can increment the tuple count. After
-	 * incrementing it, check to see if it's time for a split.
+	 * Overflow-signal prototype: on the common path (tuple fit without a new
+	 * overflow page) do not lock or touch the metapage; just accumulate a
+	 * pending count.  Only when this insert added an overflow page do we flush
+	 * the pending count into hashm_ntuples and ask for a split.  On that path
+	 * _hash_addovflpage already exclusive-locked and released the metapage, so
+	 * re-locking is the same cost that path already paid.
 	 */
-	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+	if (added_ovfl)
+		LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
 
 	/* Do the update.  No ereport(ERROR) until changes are logged */
 	START_CRIT_SECTION();
@@ -203,15 +254,27 @@ restart_insert:
 	itup_off = _hash_pgaddtup(rel, buf, itemsz, itup, sorted);
 	MarkBufferDirty(buf);
 
-	/* metapage operations */
-	metap = HashPageGetMeta(metapage);
-	metap->hashm_ntuples += 1;
+	do_expand = false;
+	{
+		uint32	   *pending = hash_pending_slot(RelationGetRelid(rel));
 
-	/* Make sure this stays in sync with _hash_expandtable() */
-	do_expand = metap->hashm_ntuples >
-		(double) metap->hashm_ffactor * (metap->hashm_maxbucket + 1);
+		if (added_ovfl)
+		{
+			ntup_delta = *pending + 1;
+			*pending = 0;
 
-	MarkBufferDirty(metabuf);
+			metap = HashPageGetMeta(metapage);
+			metap->hashm_ntuples += (double) ntup_delta;
+
+			/* Make sure this stays in sync with _hash_expandtable() */
+			do_expand = metap->hashm_ntuples >
+				(double) metap->hashm_ffactor * (metap->hashm_maxbucket + 1);
+
+			MarkBufferDirty(metabuf);
+		}
+		else
+			(*pending)++;
+	}
 
 	/* XLOG stuff */
 	if (RelationNeedsWAL(rel))
@@ -219,11 +282,13 @@ restart_insert:
 		xl_hash_insert xlrec;
 
 		xlrec.offnum = itup_off;
+		xlrec.ntup_delta = ntup_delta;		/* 0 unless this record flushed */
 
 		XLogBeginInsert();
 		XLogRegisterData(&xlrec, SizeOfHashInsert);
 
-		XLogRegisterBuffer(1, metabuf, REGBUF_STANDARD);
+		if (added_ovfl)
+			XLogRegisterBuffer(1, metabuf, REGBUF_STANDARD);
 
 		XLogRegisterBuffer(0, buf, REGBUF_STANDARD);
 		XLogRegisterBufData(0, itup, IndexTupleSize(itup));
@@ -234,12 +299,13 @@ restart_insert:
 		recptr = XLogGetFakeLSN(rel);
 
 	PageSetLSN(BufferGetPage(buf), recptr);
-	PageSetLSN(BufferGetPage(metabuf), recptr);
+	if (added_ovfl)
+		PageSetLSN(BufferGetPage(metabuf), recptr);
 
 	END_CRIT_SECTION();
 
-	/* drop lock on metapage, but keep pin */
-	LockBuffer(metabuf, BUFFER_LOCK_UNLOCK);
+	if (added_ovfl)
+		LockBuffer(metabuf, BUFFER_LOCK_UNLOCK);
 
 	/*
 	 * Release the modified page and ensure to release the pin on primary

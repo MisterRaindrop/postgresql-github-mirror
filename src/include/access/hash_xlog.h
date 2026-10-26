@@ -62,9 +62,10 @@
 typedef struct xl_hash_insert
 {
 	OffsetNumber offnum;
+	uint32		ntup_delta;		/* batched hashm_ntuples increment (0 if none) */
 } xl_hash_insert;
 
-#define SizeOfHashInsert	(offsetof(xl_hash_insert, offnum) + sizeof(OffsetNumber))
+#define SizeOfHashInsert	(offsetof(xl_hash_insert, ntup_delta) + sizeof(uint32))
 
 /*
  * This is what we need to know about addition of overflow page.
