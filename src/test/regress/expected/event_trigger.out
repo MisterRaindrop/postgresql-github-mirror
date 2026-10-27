@@ -620,11 +620,11 @@ alter table rewriteme alter column foo type numeric;
 ERROR:  rewrites not allowed
 CONTEXT:  PL/pgSQL function test_evtrig_no_rewrite() line 3 at RAISE
 alter table rewriteme add column baz int default 0;
--- test with more than one reason to rewrite a single table
+-- test with more than one reason to rewrite a single table or matview
 CREATE OR REPLACE FUNCTION test_evtrig_no_rewrite() RETURNS event_trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-  RAISE NOTICE 'Table ''%'' is being rewritten (reason = %)',
+  RAISE NOTICE 'Relation ''%'' is being rewritten (reason = %)',
                pg_event_trigger_table_rewrite_oid()::regclass,
                pg_event_trigger_table_rewrite_reason();
 END;
@@ -633,11 +633,11 @@ alter table rewriteme
  add column onemore int default 0,
  add column another int default -1,
  alter column foo type numeric(10,4);
-NOTICE:  Table 'rewriteme' is being rewritten (reason = 4)
+NOTICE:  Relation 'rewriteme' is being rewritten (reason = 4)
 -- matview rewrite when changing access method
 CREATE MATERIALIZED VIEW heapmv USING heap AS SELECT 1 AS a;
 ALTER MATERIALIZED VIEW heapmv SET ACCESS METHOD heap2;
-NOTICE:  Table 'heapmv' is being rewritten (reason = 8)
+NOTICE:  Relation 'heapmv' is being rewritten (reason = 8)
 DROP MATERIALIZED VIEW heapmv;
 -- shouldn't trigger a table_rewrite event
 alter table rewriteme alter column foo type numeric(12,4);
@@ -648,7 +648,7 @@ set timezone to '0';
 alter table rewriteme alter column bar type timestamptz;
 set timezone to 'Europe/London';
 alter table rewriteme alter column bar type timestamp; -- does rewrite
-NOTICE:  Table 'rewriteme' is being rewritten (reason = 4)
+NOTICE:  Relation 'rewriteme' is being rewritten (reason = 4)
 rollback;
 -- typed tables are rewritten when their type changes.  Don't emit table
 -- name, because firing order is not stable.

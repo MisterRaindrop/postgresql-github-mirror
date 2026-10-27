@@ -442,11 +442,11 @@ insert into rewriteme
 alter table rewriteme alter column foo type numeric;
 alter table rewriteme add column baz int default 0;
 
--- test with more than one reason to rewrite a single table
+-- test with more than one reason to rewrite a single table or matview
 CREATE OR REPLACE FUNCTION test_evtrig_no_rewrite() RETURNS event_trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-  RAISE NOTICE 'Table ''%'' is being rewritten (reason = %)',
+  RAISE NOTICE 'Relation ''%'' is being rewritten (reason = %)',
                pg_event_trigger_table_rewrite_oid()::regclass,
                pg_event_trigger_table_rewrite_reason();
 END;
