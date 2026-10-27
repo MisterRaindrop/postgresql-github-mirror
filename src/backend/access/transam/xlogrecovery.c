@@ -2478,7 +2478,13 @@ verifyBackupPageConsistency(XLogReaderState *record)
 			continue;
 		}
 
-		Assert(XLogRecHasBlockImage(record, block_id));
+		/*
+		 * A block registered with REGBUF_NO_CHANGE is not modified by this
+		 * record and carries no full-page image (see XLogRecordAssemble), so
+		 * there is nothing to consistency-check for it.  Skip it.
+		 */
+		if (!XLogRecHasBlockImage(record, block_id))
+			continue;
 
 		if (XLogRecBlockImageApply(record, block_id))
 		{
