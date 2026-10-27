@@ -1265,6 +1265,42 @@ SELECT 'Goldmann' < 'Götz' COLLATE "de-x-icu", 'Goldmann' > 'Götz' COLLATE tes
  t        | t
 (1 row)
 
+-- Test that reordering the "digit" reordering group is applied consistently
+-- by comparisons and by sorting (which may use sort keys).  In some ICU
+-- versions, comparisons ignored the reordering while sort keys honored it
+-- (ICU-23016).
+CREATE COLLATION testcoll_digitslast (provider = icu, locale = 'und-u-kr-latn-digit');
+CREATE TABLE test_digitslast (a text COLLATE testcoll_digitslast);
+INSERT INTO test_digitslast VALUES ('1'), ('2'), ('a'), ('b'), ('A'), ('B');
+-- The sorted position of each value must agree with direct comparisons.
+SELECT bool_and(consistent) FROM
+  (SELECT row_number() OVER (ORDER BY a) =
+          1 + (SELECT count(*) FROM test_digitslast u WHERE u.a < x.a)
+          AS consistent
+   FROM test_digitslast x) s;
+ bool_and 
+----------
+ t
+(1 row)
+
+SELECT a FROM test_digitslast ORDER BY a;  -- letters sort before digits
+ a 
+---
+ a
+ A
+ b
+ B
+ 1
+ 2
+(6 rows)
+
+SELECT 'a' < '1' COLLATE testcoll_digitslast;  -- true
+ ?column? 
+----------
+ t
+(1 row)
+
+DROP TABLE test_digitslast;
 -- rules
 CREATE COLLATION testcoll_rules1 (provider = icu, locale = '', rules = '&a < g');
 NOTICE:  using standard form "und" for ICU locale ""
