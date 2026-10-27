@@ -501,6 +501,24 @@ CREATE COLLATION testcoll_de_phonebook (provider = icu, locale = 'de@collation=p
 SELECT 'Goldmann' < 'Götz' COLLATE "de-x-icu", 'Goldmann' > 'Götz' COLLATE testcoll_de_phonebook;
 
 
+-- Test that reordering the "digit" reordering group is applied consistently
+-- by comparisons and by sorting (which may use sort keys).  In some ICU
+-- versions, comparisons ignored the reordering while sort keys honored it
+-- (ICU-23016).
+CREATE COLLATION testcoll_digitslast (provider = icu, locale = 'und-u-kr-latn-digit');
+CREATE TABLE test_digitslast (a text COLLATE testcoll_digitslast);
+INSERT INTO test_digitslast VALUES ('1'), ('2'), ('a'), ('b'), ('A'), ('B');
+-- The sorted position of each value must agree with direct comparisons.
+SELECT bool_and(consistent) FROM
+  (SELECT row_number() OVER (ORDER BY a) =
+          1 + (SELECT count(*) FROM test_digitslast u WHERE u.a < x.a)
+          AS consistent
+   FROM test_digitslast x) s;
+SELECT a FROM test_digitslast ORDER BY a;  -- letters sort before digits
+SELECT 'a' < '1' COLLATE testcoll_digitslast;  -- true
+DROP TABLE test_digitslast;
+
+
 -- rules
 
 CREATE COLLATION testcoll_rules1 (provider = icu, locale = '', rules = '&a < g');
