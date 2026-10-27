@@ -2052,18 +2052,27 @@ ExecuteTruncateGuts(List *explicit_rels,
 	rels = list_copy(explicit_rels);
 	if (behavior == DROP_CASCADE)
 	{
-		for (;;)
+		List	   *pending = list_copy(relids);
+
+		/*
+		 * Each iteration only needs the referencers of the rels added by the
+		 * previous one; those of older rels were already added.
+		 */
+		while (pending != NIL)
 		{
 			List	   *newrelids;
 
-			newrelids = heap_truncate_find_FKs(relids);
-			if (newrelids == NIL)
-				break;			/* nothing else to add */
+			newrelids = heap_truncate_find_FKs(pending);
+			list_free(pending);
+			pending = NIL;
 
 			foreach(cell, newrelids)
 			{
 				Oid			relid = lfirst_oid(cell);
 				Relation	rel;
+
+				if (list_member_oid(relids, relid))
+					continue;
 
 				rel = table_open(relid, AccessExclusiveLock);
 				ereport(NOTICE,
@@ -2074,6 +2083,7 @@ ExecuteTruncateGuts(List *explicit_rels,
 				truncate_check_activity(rel);
 				rels = lappend(rels, rel);
 				relids = lappend_oid(relids, relid);
+				pending = lappend_oid(pending, relid);
 
 				/* Log this relation only if needed for logical decoding */
 				if (RelationIsLogicallyLogged(rel))

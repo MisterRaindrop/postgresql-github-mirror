@@ -1091,12 +1091,18 @@ ALTER TABLE confrelid_pk DETACH PARTITION confrelid_pk1;
 SELECT pg_stat_force_next_flush();
 SELECT confrelid_idx_scan() > :confrelid_scans AS get_parented_fk_refs,
        confrelid_idx_scan() AS confrelid_scans \gset
+-- heap_truncate_find_FKs()
+TRUNCATE confrelid_pk, confrelid_fk;
+SELECT pg_stat_force_next_flush();
+SELECT confrelid_idx_scan() > :confrelid_scans AS heap_truncate_find_fks,
+       confrelid_idx_scan() AS confrelid_scans \gset
 -- ATPrepChangePersistence()
 ALTER TABLE confrelid_ul SET UNLOGGED;
 SELECT pg_stat_force_next_flush();
 SELECT confrelid_idx_scan() > :confrelid_scans AS change_persistence \gset
 SELECT :'clone_fk_referenced' AS clone_fk_referenced,
        :'get_parented_fk_refs' AS get_parented_fk_refs,
+       :'heap_truncate_find_fks' AS heap_truncate_find_fks,
        :'change_persistence' AS change_persistence;
 DROP TABLE confrelid_fk, confrelid_pk, confrelid_pk1, confrelid_ul;
 DROP FUNCTION confrelid_idx_scan();
