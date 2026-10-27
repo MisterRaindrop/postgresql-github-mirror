@@ -78,6 +78,24 @@ SELECT * FROM trunc_e;
 
 DROP TABLE truncate_a,trunc_c,trunc_b,trunc_d,trunc_e CASCADE;
 
+-- TRUNCATE ... CASCADE reaching a cycle of foreign keys: trunc_cyc_b is
+-- found through trunc_cyc_a, and trunc_cyc_a references it back
+CREATE TABLE trunc_cyc_r (id int PRIMARY KEY);
+CREATE TABLE trunc_cyc_a (id int PRIMARY KEY, r int REFERENCES trunc_cyc_r, b int);
+CREATE TABLE trunc_cyc_b (id int PRIMARY KEY, a int REFERENCES trunc_cyc_a);
+ALTER TABLE trunc_cyc_a ADD FOREIGN KEY (b) REFERENCES trunc_cyc_b;
+INSERT INTO trunc_cyc_r VALUES (1);
+INSERT INTO trunc_cyc_a VALUES (1, 1, NULL);
+INSERT INTO trunc_cyc_b VALUES (1, 1);
+UPDATE trunc_cyc_a SET b = 1;
+TRUNCATE TABLE trunc_cyc_r CASCADE;
+SELECT count(*) FROM trunc_cyc_r
+   UNION ALL
+ SELECT count(*) FROM trunc_cyc_a
+   UNION ALL
+ SELECT count(*) FROM trunc_cyc_b;
+DROP TABLE trunc_cyc_r, trunc_cyc_a, trunc_cyc_b;
+
 -- Test TRUNCATE with inheritance
 
 CREATE TABLE trunc_f (col1 integer primary key);

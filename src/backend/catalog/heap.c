@@ -3817,12 +3817,15 @@ heap_truncate_find_FKs(List *relationIds)
 	SysScanDesc fkeyScan;
 	HeapTuple	tuple;
 	bool		restart;
+	int			nprobed = 0;
 
 	oids = list_copy(relationIds);
 
 	/*
-	 * Must scan pg_constraint.  Right now, it is a seqscan because there is
-	 * no available index on confrelid.
+	 * Must scan pg_constraint.  Look up each relation in our list through the
+	 * index on confrelid, which is only set nonzero by FK constraints, so we
+	 * visit just the foreign keys that reference our list.  A restart only
+	 * needs to look up the relations added since the previous pass.
 	 */
 	fkeyRel = table_open(ConstraintRelationId, AccessShareLock);
 
@@ -3830,40 +3833,46 @@ restart:
 	restart = false;
 	parent_cons = NIL;
 
-	fkeyScan = systable_beginscan(fkeyRel, InvalidOid, false,
-								  NULL, 0, NULL);
-
-	while (HeapTupleIsValid(tuple = systable_getnext(fkeyScan)))
+	for_each_from(cell, oids, nprobed)
 	{
-		Form_pg_constraint con = (Form_pg_constraint) GETSTRUCT(tuple);
+		ScanKeyInit(&key,
+					Anum_pg_constraint_confrelid,
+					BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(lfirst_oid(cell)));
 
-		/* Not a foreign key */
-		if (con->contype != CONSTRAINT_FOREIGN)
-			continue;
+		fkeyScan = systable_beginscan(fkeyRel, ConstraintConfRelidIndexId,
+									  true, NULL, 1, &key);
 
-		/* Not referencing one of our list of tables */
-		if (!list_member_oid(oids, con->confrelid))
-			continue;
+		while (HeapTupleIsValid(tuple = systable_getnext(fkeyScan)))
+		{
+			Form_pg_constraint con = (Form_pg_constraint) GETSTRUCT(tuple);
 
-		/*
-		 * If this constraint has a parent constraint which we have not seen
-		 * yet, keep track of it for the second loop, below.  Tracking parent
-		 * constraints allows us to climb up to the top-level constraint and
-		 * look for all possible relations referencing the partitioned table.
-		 */
-		if (OidIsValid(con->conparentid) &&
-			!list_member_oid(parent_cons, con->conparentid))
-			parent_cons = lappend_oid(parent_cons, con->conparentid);
+			/* Not a foreign key */
+			if (con->contype != CONSTRAINT_FOREIGN)
+				continue;
 
-		/*
-		 * Add referencer to result, unless present in input list.  (Don't
-		 * worry about dupes: we'll fix that below).
-		 */
-		if (!list_member_oid(relationIds, con->conrelid))
-			result = lappend_oid(result, con->conrelid);
+			/*
+			 * If this constraint has a parent constraint which we have not
+			 * seen yet, keep track of it for the second loop, below. Tracking
+			 * parent constraints allows us to climb up to the top-level
+			 * constraint and look for all possible relations referencing the
+			 * partitioned table.
+			 */
+			if (OidIsValid(con->conparentid) &&
+				!list_member_oid(parent_cons, con->conparentid))
+				parent_cons = lappend_oid(parent_cons, con->conparentid);
+
+			/*
+			 * Add referencer to result, unless present in input list.  (Don't
+			 * worry about dupes: we'll fix that below).
+			 */
+			if (!list_member_oid(relationIds, con->conrelid))
+				result = lappend_oid(result, con->conrelid);
+		}
+
+		systable_endscan(fkeyScan);
 	}
-
-	systable_endscan(fkeyScan);
+	nprobed = list_length(oids);
 
 	/*
 	 * Process each parent constraint we found to add the list of referenced
