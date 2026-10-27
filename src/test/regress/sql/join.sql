@@ -3180,6 +3180,187 @@ select * from sj t1
     on true
 where t1.a = s.a;
 
+explain (costs off)
+select s.y
+from sj x,
+     lateral (select coalesce(x.a, 0) from sj c where c.a = x.a) s(y)
+group by cube (1)
+order by 1;
+
+select s.y
+from sj x,
+     lateral (select coalesce(x.a, 0) from sj c where c.a = x.a) s(y)
+group by cube (1)
+order by 1;
+
+-- Ensure that SJE does not turn an indirect lateral dependency chain
+-- (c -> b -> x) into a cycle
+explain (costs off)
+select s.b
+from sj x,
+     abs(x.a) b,
+     lateral (select b.b from sj c where c.a = x.a) s
+group by cube (1)
+order by 1;
+
+select s.b
+from sj x,
+     abs(x.a) b,
+     lateral (select b.b from sj c where c.a = x.a) s
+group by cube (1)
+order by 1;
+
+explain (costs off)
+select s.a
+from sj x,
+     lateral (select x.a offset 0) b,
+     lateral (select b.a from sj c where c.a = x.a) s
+group by cube (1)
+order by 1;
+
+select s.a
+from sj x,
+     lateral (select x.a offset 0) b,
+     lateral (select b.a from sj c where c.a = x.a) s
+group by cube (1)
+order by 1;
+
+-- Original outer-join reproducer
+explain (costs off)
+select s.y
+from sj d left join
+     (sj x cross join lateral (select x.a as v offset 0) b
+           cross join lateral (select coalesce(b.v, 0) from sj c where c.a = x.a) s(y))
+     on true
+order by 1;
+
+select s.y
+from sj d left join
+     (sj x cross join lateral (select x.a as v offset 0) b
+           cross join lateral (select coalesce(b.v, 0) from sj c where c.a = x.a) s(y))
+     on true
+order by 1;
+
+-- Empty table input counterpart: GROUP BY CUBE returns a single NULL row
+create table sj_empty (a int primary key);
+
+explain (costs off)
+select s.b
+from sj_empty x,
+     abs(x.a) b,
+     lateral (select b.b from sj_empty c where c.a = x.a) s
+group by cube (1)
+order by 1;
+
+select s.b
+from sj_empty x,
+     abs(x.a) b,
+     lateral (select b.b from sj_empty c where c.a = x.a) s
+group by cube (1)
+order by 1;
+
+drop table sj_empty;
+
+-- Likewise when a join-scoped PHV only acquires c in ph_eval_at after merging
+explain (costs off)
+select s.y
+from sj x,
+     abs(x.a) b,
+     lateral (select x.a + d.a + b.b as y from sj c, sj d where c.a = x.a and d.a = x.a) s
+group by cube (1)
+order by 1;
+
+select s.y
+from sj x,
+     abs(x.a) b,
+     lateral (select x.a + d.a + b.b as y from sj c, sj d where c.a = x.a and d.a = x.a) s
+group by cube (1)
+order by 1;
+
+-- 3-way self-join where one pair (x, c1) can be merged safely, while the
+-- remaining pair (c1, c2) would create a lateral cycle and must be kept
+explain (costs off)
+select s.b
+from sj x,
+     sj c1,
+     abs(c1.a) b,
+     lateral (select b.b from sj c2 where c2.a = x.a) s
+where c1.a = x.a
+group by cube (1)
+order by 1;
+
+select s.b
+from sj x,
+     sj c1,
+     abs(c1.a) b,
+     lateral (select b.b from sj c2 where c2.a = x.a) s
+where c1.a = x.a
+group by cube (1)
+order by 1;
+
+-- Two self-join pairs across separate candidate groups (sj and sj2),
+-- where merging the first pair is safe, but merging both would form a cycle
+create table sj2 (a int primary key);
+insert into sj2 values (1), (2);
+analyze sj2;
+
+explain (costs off)
+select s1.b1 + s2.b2 as sum_b
+from sj x1,
+     sj2 x2,
+     abs(x2.a) b1,
+     abs(x1.a) b2,
+     lateral (select b1.b1 from sj c1 where c1.a = x1.a) s1,
+     lateral (select b2.b2 from sj2 c2 where c2.a = x2.a) s2
+group by cube (1)
+order by 1;
+
+select s1.b1 + s2.b2 as sum_b
+from sj x1,
+     sj2 x2,
+     abs(x2.a) b1,
+     abs(x1.a) b2,
+     lateral (select b1.b1 from sj c1 where c1.a = x1.a) s1,
+     lateral (select b2.b2 from sj2 c2 where c2.a = x2.a) s2
+group by cube (1)
+order by 1;
+
+-- Safe self-join merge modifying nested PlaceHolderVars, read by a later candidate
+explain (costs off)
+select s2.y
+from (sj x1
+       left join lateral (select x1.a + 1 as v1) ph1 on true
+       left join lateral (select ph1.v1 + 10 as v2) ph2 on true),
+     sj c1,
+     sj2 x2,
+     abs(x2.a) b2,
+     lateral (
+         select ph2.v2 + c2.a + b2.b2 as y
+         from sj2 c2
+         where c2.a = x2.a
+     ) s2
+where c1.a = x1.a
+group by cube (1)
+order by 1;
+
+select s2.y
+from (sj x1
+       left join lateral (select x1.a + 1 as v1) ph1 on true
+       left join lateral (select ph1.v1 + 10 as v2) ph2 on true),
+     sj c1,
+     sj2 x2,
+     abs(x2.a) b2,
+     lateral (
+         select ph2.v2 + c2.a + b2.b2 as y
+         from sj2 c2
+         where c2.a = x2.a
+     ) s2
+where c1.a = x1.a
+group by cube (1)
+order by 1;
+
+drop table sj2;
+
 -- Degenerated case.
 explain (costs off)
 select * from

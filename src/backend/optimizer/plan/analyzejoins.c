@@ -33,6 +33,7 @@
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
+#include "optimizer/placeholder.h"
 #include "optimizer/planmain.h"
 #include "optimizer/prep.h"
 #include "optimizer/restrictinfo.h"
@@ -91,6 +92,10 @@ static void fixup_selfjoin_jointree(PlannerInfo *root, Node *jtnode, int relid,
 									Node **hoist_quals, bool *found_relid);
 static List *fixup_selfjoin_quals(PlannerInfo *root, List *quals, int relid);
 static Node *replace_selfjoin_qual(Node *qual);
+static void update_placeholder_eval_levels(PlannerInfo *root);
+static bool self_join_creates_lateral_cycle(PlannerInfo *root,
+											RelOptInfo *toKeep,
+											RelOptInfo *toRemove);
 static int	self_join_candidates_cmp(const void *a, const void *b);
 
 
@@ -1297,6 +1302,34 @@ remove_self_join_rel(PlannerInfo *root,
 			rmark->rti = rmark->prti = toKeep->relid;
 		}
 	}
+
+	/*
+	 * Update all_baserels, baserel lateral_vars, and PlaceHolderInfos so that
+	 * any subsequent self-join checks in the same pass see the updated
+	 * relation references.
+	 */
+	root->all_baserels = bms_del_member(root->all_baserels, toRemove->relid);
+	if (root->hasLateralRTEs)
+	{
+		int			rti = -1;
+		ListCell   *lc;
+
+		while ((rti = bms_next_member(root->all_baserels, rti)) > 0)
+		{
+			RelOptInfo *brel = root->simple_rel_array[rti];
+
+			ChangeVarNodes((Node *) brel->lateral_vars,
+						   toRemove->relid, toKeep->relid, 0);
+		}
+		foreach(lc, root->placeholder_list)
+		{
+			PlaceHolderInfo *phinfo = (PlaceHolderInfo *) lfirst(lc);
+
+			ChangeVarNodes((Node *) phinfo->ph_var,
+						   toRemove->relid, toKeep->relid, 0);
+		}
+		update_placeholder_eval_levels(root);
+	}
 }
 
 /*
@@ -1770,6 +1803,238 @@ match_unique_clauses(PlannerInfo *root, RelOptInfo *outer, List *uclauses,
 }
 
 /*
+ * Recompute ph_eval_at and ph_lateral for all PlaceHolderInfos in
+ * root->placeholder_list from their current ph_var expressions.
+ *
+ * We clear and repopulate placeholder_array in placeholder_list order so that
+ * if one PlaceHolderVar references another, pull_varnos() sees the same
+ * placeholder_array state as find_placeholder_info() will see after
+ * query_planner() restarts.
+ */
+static void
+update_placeholder_eval_levels(PlannerInfo *root)
+{
+	ListCell   *lc;
+
+	foreach(lc, root->placeholder_list)
+	{
+		PlaceHolderInfo *phinfo = (PlaceHolderInfo *) lfirst(lc);
+
+		if (phinfo->phid < root->placeholder_array_size)
+			root->placeholder_array[phinfo->phid] = NULL;
+	}
+
+	foreach(lc, root->placeholder_list)
+	{
+		PlaceHolderInfo *phinfo = (PlaceHolderInfo *) lfirst(lc);
+		PlaceHolderVar *phv = phinfo->ph_var;
+		Relids		rels_used;
+
+		rels_used = pull_varnos(root, (Node *) phv->phexpr);
+		phinfo->ph_lateral = bms_difference(rels_used, phv->phrels);
+		phinfo->ph_eval_at = bms_int_members(rels_used, phv->phrels);
+		/* If no contained vars, force evaluation at syntactic location */
+		if (bms_is_empty(phinfo->ph_eval_at))
+		{
+			phinfo->ph_eval_at = bms_copy(phv->phrels);
+			Assert(!bms_is_empty(phinfo->ph_eval_at));
+		}
+		if (phinfo->phid < root->placeholder_array_size)
+			root->placeholder_array[phinfo->phid] = phinfo;
+	}
+}
+
+/*
+ * Check whether merging toRemove into toKeep would create a lateral
+ * dependency cycle (that is, a relation that laterally depends on itself,
+ * either directly or indirectly through other relations or PlaceHolderVars).
+ *
+ * Self-join elimination can turn a valid lateral dependency chain such as
+ * rel1 -> rel2 -> rel3 into a cycle if rel1 and rel3 are merged.  Check for
+ * that by computing the per-baserel lateral_relids that
+ * create_lateral_join_info() will derive after the merge, and testing whether
+ * the transitive closure contains any self-dependency.
+ */
+static bool
+self_join_creates_lateral_cycle(PlannerInfo *root,
+								RelOptInfo *toKeep, RelOptInfo *toRemove)
+{
+	typedef struct
+	{
+		PlaceHolderVar *ph_var;
+		Relids		ph_eval_at;
+		Relids		ph_lateral;
+	} SavedPlaceHolderInfo;
+
+	int			k = toKeep->relid;
+	int			r = toRemove->relid;
+	Relids		baserels;
+	Relids	   *lateral_relids;
+	SavedPlaceHolderInfo *saved_ph = NULL;
+	bool		found_laterals = false;
+	bool		has_cycle = false;
+	int			num_ph;
+	int			i;
+	int			rti;
+	ListCell   *lc;
+
+	/* Nothing to do if the query has no LATERAL RTEs */
+	if (!root->hasLateralRTEs)
+		return false;
+
+	baserels = bms_difference(root->all_baserels, toRemove->relids);
+	lateral_relids = palloc0_array(Relids, root->simple_rel_array_size);
+
+	/*
+	 * Temporarily update each PlaceHolderInfo's ph_var, ph_eval_at, and
+	 * ph_lateral to reflect replacing r with k, matching what
+	 * find_placeholder_info() will compute after query_planner() restarts.
+	 */
+	num_ph = list_length(root->placeholder_list);
+	if (num_ph > 0)
+	{
+		saved_ph = palloc_array(SavedPlaceHolderInfo, num_ph);
+		i = 0;
+		foreach(lc, root->placeholder_list)
+		{
+			PlaceHolderInfo *phinfo = (PlaceHolderInfo *) lfirst(lc);
+
+			saved_ph[i].ph_var = phinfo->ph_var;
+			saved_ph[i].ph_eval_at = phinfo->ph_eval_at;
+			saved_ph[i].ph_lateral = phinfo->ph_lateral;
+			i++;
+
+			phinfo->ph_var = copyObject(phinfo->ph_var);
+			ChangeVarNodes((Node *) phinfo->ph_var, r, k, 0);
+		}
+		update_placeholder_eval_levels(root);
+	}
+
+	/*
+	 * Collect direct lateral dependencies from each remaining baserel's
+	 * lateral_vars, translating references to r into k.
+	 */
+	rti = -1;
+	while ((rti = bms_next_member(baserels, rti)) > 0)
+	{
+		RelOptInfo *brel = root->simple_rel_array[rti];
+
+		Assert(brel != NULL && brel->reloptkind == RELOPT_BASEREL);
+
+		foreach(lc, brel->lateral_vars)
+		{
+			Node	   *node = (Node *) lfirst(lc);
+
+			if (IsA(node, Var))
+			{
+				Var		   *var = (Var *) node;
+				int			varno = (var->varno == r) ? k : var->varno;
+
+				found_laterals = true;
+				lateral_relids[rti] = bms_add_member(lateral_relids[rti],
+													 varno);
+			}
+			else if (IsA(node, PlaceHolderVar))
+			{
+				PlaceHolderVar *phv = (PlaceHolderVar *) node;
+				PlaceHolderInfo *phinfo = find_placeholder_info(root, phv);
+
+				found_laterals = true;
+				lateral_relids[rti] = bms_add_members(lateral_relids[rti],
+													  phinfo->ph_eval_at);
+			}
+			else
+				Assert(false);
+		}
+	}
+
+	/*
+	 * Collect lateral dependencies from PlaceHolderVars, marking each baserel
+	 * in ph_eval_at as laterally dependent on the baserels in ph_lateral.
+	 */
+	foreach(lc, root->placeholder_list)
+	{
+		PlaceHolderInfo *phinfo = (PlaceHolderInfo *) lfirst(lc);
+		Relids		eval_at = phinfo->ph_eval_at;
+		Relids		lateral_refs;
+		int			varno;
+
+		if (phinfo->ph_lateral == NULL)
+			continue;
+
+		lateral_refs = bms_intersect(phinfo->ph_lateral, baserels);
+		if (bms_is_empty(lateral_refs))
+			continue;
+
+		found_laterals = true;
+
+		varno = -1;
+		while ((varno = bms_next_member(eval_at, varno)) >= 0)
+		{
+			if (bms_is_member(varno, baserels))
+				lateral_relids[varno] = bms_add_members(lateral_relids[varno],
+														lateral_refs);
+		}
+	}
+
+	/*
+	 * Compute the transitive closure of lateral_relids (Warshall's algorithm)
+	 * and check whether any baserel ends up laterally dependent on itself.
+	 */
+	if (found_laterals)
+	{
+		rti = -1;
+		while ((rti = bms_next_member(baserels, rti)) > 0)
+		{
+			Relids		outer_lateral_relids = lateral_relids[rti];
+			int			rti2;
+
+			if (outer_lateral_relids == NULL)
+				continue;
+
+			rti2 = -1;
+			while ((rti2 = bms_next_member(baserels, rti2)) > 0)
+			{
+				if (bms_is_member(rti, lateral_relids[rti2]))
+					lateral_relids[rti2] = bms_add_members(lateral_relids[rti2],
+														   outer_lateral_relids);
+			}
+		}
+
+		rti = -1;
+		while ((rti = bms_next_member(baserels, rti)) > 0)
+		{
+			if (bms_is_member(rti, lateral_relids[rti]))
+			{
+				has_cycle = true;
+				break;
+			}
+		}
+	}
+
+	/* Restore PlaceHolderInfos to their pre-check state */
+	if (num_ph > 0)
+	{
+		i = 0;
+		foreach(lc, root->placeholder_list)
+		{
+			PlaceHolderInfo *phinfo = (PlaceHolderInfo *) lfirst(lc);
+
+			phinfo->ph_var = saved_ph[i].ph_var;
+			phinfo->ph_eval_at = saved_ph[i].ph_eval_at;
+			phinfo->ph_lateral = saved_ph[i].ph_lateral;
+			i++;
+		}
+		pfree(saved_ph);
+	}
+
+	pfree(lateral_relids);
+	bms_free(baserels);
+
+	return has_cycle;
+}
+
+/*
  * Find and remove unique self-joins in a group of base relations that have
  * the same Oid.
  *
@@ -1872,10 +2137,6 @@ remove_self_joins_one_group(PlannerInfo *root, Relids relids)
 			joinrelids = bms_add_member(joinrelids, k);
 
 			/*
-			 * PHVs should not impose any constraints on removing self-joins.
-			 */
-
-			/*
 			 * At this stage, joininfo lists of inner and outer can contain
 			 * only clauses required for a superior outer join that can't
 			 * influence this optimization. So, we can avoid to call the
@@ -1931,6 +2192,14 @@ remove_self_joins_one_group(PlannerInfo *root, Relids relids)
 			 * join.
 			 */
 			if (!match_unique_clauses(root, rrel, uclauses, krel->relid))
+				continue;
+
+			/*
+			 * Reject the merge if combining rrel and krel would turn a chain
+			 * of lateral dependencies (possibly involving PlaceHolderVars)
+			 * into a cycle.
+			 */
+			if (self_join_creates_lateral_cycle(root, krel, rrel))
 				continue;
 
 			/* OK, remove rrel from the query */

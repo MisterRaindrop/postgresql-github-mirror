@@ -8211,6 +8211,390 @@ where t1.a = s.a;
    Filter: (a IS NOT NULL)
 (2 rows)
 
+explain (costs off)
+select s.y
+from sj x,
+     lateral (select coalesce(x.a, 0) from sj c where c.a = x.a) s(y)
+group by cube (1)
+order by 1;
+              QUERY PLAN               
+---------------------------------------
+ Sort
+   Sort Key: (COALESCE(c.a, 0))
+   ->  MixedAggregate
+         Hash Key: COALESCE(c.a, 0)
+         Group Key: ()
+         ->  Seq Scan on sj c
+               Filter: (a IS NOT NULL)
+(7 rows)
+
+select s.y
+from sj x,
+     lateral (select coalesce(x.a, 0) from sj c where c.a = x.a) s(y)
+group by cube (1)
+order by 1;
+ y 
+---
+ 1
+ 2
+  
+(3 rows)
+
+-- Ensure that SJE does not turn an indirect lateral dependency chain
+-- (c -> b -> x) into a cycle
+explain (costs off)
+select s.b
+from sj x,
+     abs(x.a) b,
+     lateral (select b.b from sj c where c.a = x.a) s
+group by cube (1)
+order by 1;
+                   QUERY PLAN                   
+------------------------------------------------
+ Sort
+   Sort Key: (b.b)
+   ->  MixedAggregate
+         Hash Key: (b.b)
+         Group Key: ()
+         ->  Nested Loop
+               ->  Nested Loop
+                     ->  Seq Scan on sj x
+                     ->  Function Scan on abs b
+               ->  Memoize
+                     Cache Key: x.a, b.b
+                     Cache Mode: binary
+                     ->  Seq Scan on sj c
+                           Filter: (x.a = a)
+(14 rows)
+
+select s.b
+from sj x,
+     abs(x.a) b,
+     lateral (select b.b from sj c where c.a = x.a) s
+group by cube (1)
+order by 1;
+ b 
+---
+ 1
+ 2
+  
+(3 rows)
+
+explain (costs off)
+select s.a
+from sj x,
+     lateral (select x.a offset 0) b,
+     lateral (select b.a from sj c where c.a = x.a) s
+group by cube (1)
+order by 1;
+                 QUERY PLAN                  
+---------------------------------------------
+ Sort
+   Sort Key: ((x.a))
+   ->  MixedAggregate
+         Hash Key: ((x.a))
+         Group Key: ()
+         ->  Nested Loop
+               ->  Nested Loop
+                     ->  Seq Scan on sj x
+                     ->  Result
+               ->  Memoize
+                     Cache Key: x.a, (x.a)
+                     Cache Mode: binary
+                     ->  Seq Scan on sj c
+                           Filter: (x.a = a)
+(14 rows)
+
+select s.a
+from sj x,
+     lateral (select x.a offset 0) b,
+     lateral (select b.a from sj c where c.a = x.a) s
+group by cube (1)
+order by 1;
+ a 
+---
+ 1
+ 2
+  
+(3 rows)
+
+-- Original outer-join reproducer
+explain (costs off)
+select s.y
+from sj d left join
+     (sj x cross join lateral (select x.a as v offset 0) b
+           cross join lateral (select coalesce(b.v, 0) from sj c where c.a = x.a) s(y))
+     on true
+order by 1;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Sort
+   Sort Key: (COALESCE((x.a), 0))
+   ->  Nested Loop Left Join
+         ->  Seq Scan on sj d
+         ->  Materialize
+               ->  Nested Loop
+                     ->  Nested Loop
+                           ->  Seq Scan on sj x
+                           ->  Result
+                     ->  Memoize
+                           Cache Key: x.a, COALESCE((x.a), 0)
+                           Cache Mode: binary
+                           ->  Seq Scan on sj c
+                                 Filter: (x.a = a)
+(14 rows)
+
+select s.y
+from sj d left join
+     (sj x cross join lateral (select x.a as v offset 0) b
+           cross join lateral (select coalesce(b.v, 0) from sj c where c.a = x.a) s(y))
+     on true
+order by 1;
+ y 
+---
+ 1
+ 1
+ 1
+ 2
+ 2
+ 2
+(6 rows)
+
+-- Empty table input counterpart: GROUP BY CUBE returns a single NULL row
+create table sj_empty (a int primary key);
+explain (costs off)
+select s.b
+from sj_empty x,
+     abs(x.a) b,
+     lateral (select b.b from sj_empty c where c.a = x.a) s
+group by cube (1)
+order by 1;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Sort
+   Sort Key: (b.b)
+   ->  MixedAggregate
+         Hash Key: (b.b)
+         Group Key: ()
+         ->  Nested Loop
+               ->  Nested Loop
+                     ->  Seq Scan on sj_empty x
+                     ->  Function Scan on abs b
+               ->  Index Only Scan using sj_empty_pkey on sj_empty c
+                     Index Cond: (a = x.a)
+(11 rows)
+
+select s.b
+from sj_empty x,
+     abs(x.a) b,
+     lateral (select b.b from sj_empty c where c.a = x.a) s
+group by cube (1)
+order by 1;
+ b 
+---
+  
+(1 row)
+
+drop table sj_empty;
+-- Likewise when a join-scoped PHV only acquires c in ph_eval_at after merging
+explain (costs off)
+select s.y
+from sj x,
+     abs(x.a) b,
+     lateral (select x.a + d.a + b.b as y from sj c, sj d where c.a = x.a and d.a = x.a) s
+group by cube (1)
+order by 1;
+                   QUERY PLAN                   
+------------------------------------------------
+ Sort
+   Sort Key: (((x.a + d.a) + b.b))
+   ->  MixedAggregate
+         Hash Key: (((x.a + d.a) + b.b))
+         Group Key: ()
+         ->  Nested Loop
+               ->  Nested Loop
+                     ->  Seq Scan on sj x
+                     ->  Function Scan on abs b
+               ->  Memoize
+                     Cache Key: x.a, b.b
+                     Cache Mode: binary
+                     ->  Seq Scan on sj d
+                           Filter: (x.a = a)
+(14 rows)
+
+select s.y
+from sj x,
+     abs(x.a) b,
+     lateral (select x.a + d.a + b.b as y from sj c, sj d where c.a = x.a and d.a = x.a) s
+group by cube (1)
+order by 1;
+ y 
+---
+ 3
+ 6
+  
+(3 rows)
+
+-- 3-way self-join where one pair (x, c1) can be merged safely, while the
+-- remaining pair (c1, c2) would create a lateral cycle and must be kept
+explain (costs off)
+select s.b
+from sj x,
+     sj c1,
+     abs(c1.a) b,
+     lateral (select b.b from sj c2 where c2.a = x.a) s
+where c1.a = x.a
+group by cube (1)
+order by 1;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Sort
+   Sort Key: (b.b)
+   ->  MixedAggregate
+         Hash Key: (b.b)
+         Group Key: ()
+         ->  Nested Loop
+               ->  Nested Loop
+                     ->  Seq Scan on sj c1
+                           Filter: (a IS NOT NULL)
+                     ->  Function Scan on abs b
+               ->  Seq Scan on sj c2
+                     Filter: (c1.a = a)
+(12 rows)
+
+select s.b
+from sj x,
+     sj c1,
+     abs(c1.a) b,
+     lateral (select b.b from sj c2 where c2.a = x.a) s
+where c1.a = x.a
+group by cube (1)
+order by 1;
+ b 
+---
+ 1
+ 2
+  
+(3 rows)
+
+-- Two self-join pairs across separate candidate groups (sj and sj2),
+-- where merging the first pair is safe, but merging both would form a cycle
+create table sj2 (a int primary key);
+insert into sj2 values (1), (2);
+analyze sj2;
+explain (costs off)
+select s1.b1 + s2.b2 as sum_b
+from sj x1,
+     sj2 x2,
+     abs(x2.a) b1,
+     abs(x1.a) b2,
+     lateral (select b1.b1 from sj c1 where c1.a = x1.a) s1,
+     lateral (select b2.b2 from sj2 c2 where c2.a = x2.a) s2
+group by cube (1)
+order by 1;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Sort
+   Sort Key: (((b1.b1) + (b2.b2)))
+   ->  MixedAggregate
+         Hash Key: ((b1.b1) + (b2.b2))
+         Group Key: ()
+         ->  Nested Loop
+               ->  Nested Loop
+                     ->  Nested Loop
+                           ->  Nested Loop
+                                 ->  Seq Scan on sj2 x2
+                                 ->  Function Scan on abs b1
+                           ->  Memoize
+                                 Cache Key: b1.b1
+                                 Cache Mode: binary
+                                 ->  Seq Scan on sj c1
+                                       Filter: (a IS NOT NULL)
+                     ->  Function Scan on abs b2
+               ->  Memoize
+                     Cache Key: x2.a, b2.b2
+                     Cache Mode: binary
+                     ->  Seq Scan on sj2 c2
+                           Filter: (x2.a = a)
+(22 rows)
+
+select s1.b1 + s2.b2 as sum_b
+from sj x1,
+     sj2 x2,
+     abs(x2.a) b1,
+     abs(x1.a) b2,
+     lateral (select b1.b1 from sj c1 where c1.a = x1.a) s1,
+     lateral (select b2.b2 from sj2 c2 where c2.a = x2.a) s2
+group by cube (1)
+order by 1;
+ sum_b 
+-------
+     2
+     3
+     4
+      
+(4 rows)
+
+-- Safe self-join merge modifying nested PlaceHolderVars, read by a later candidate
+explain (costs off)
+select s2.y
+from (sj x1
+       left join lateral (select x1.a + 1 as v1) ph1 on true
+       left join lateral (select ph1.v1 + 10 as v2) ph2 on true),
+     sj c1,
+     sj2 x2,
+     abs(x2.a) b2,
+     lateral (
+         select ph2.v2 + c2.a + b2.b2 as y
+         from sj2 c2
+         where c2.a = x2.a
+     ) s2
+where c1.a = x1.a
+group by cube (1)
+order by 1;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Sort
+   Sort Key: ((((((c1.a + 1) + 10)) + c2.a) + b2.b2))
+   ->  MixedAggregate
+         Hash Key: ((((((c1.a + 1) + 10)) + c2.a) + b2.b2))
+         Group Key: ()
+         ->  Nested Loop
+               ->  Seq Scan on sj c1
+                     Filter: (a IS NOT NULL)
+               ->  Nested Loop
+                     ->  Nested Loop
+                           ->  Seq Scan on sj2 x2
+                           ->  Function Scan on abs b2
+                     ->  Seq Scan on sj2 c2
+                           Filter: (x2.a = a)
+(14 rows)
+
+select s2.y
+from (sj x1
+       left join lateral (select x1.a + 1 as v1) ph1 on true
+       left join lateral (select ph1.v1 + 10 as v2) ph2 on true),
+     sj c1,
+     sj2 x2,
+     abs(x2.a) b2,
+     lateral (
+         select ph2.v2 + c2.a + b2.b2 as y
+         from sj2 c2
+         where c2.a = x2.a
+     ) s2
+where c1.a = x1.a
+group by cube (1)
+order by 1;
+ y  
+----
+ 14
+ 15
+ 16
+ 17
+   
+(5 rows)
+
+drop table sj2;
 -- Degenerated case.
 explain (costs off)
 select * from
