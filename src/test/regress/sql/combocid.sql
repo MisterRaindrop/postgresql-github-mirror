@@ -109,3 +109,46 @@ ROLLBACK TO SAVEPOINT subxact;
 SELECT * FROM testcase WHERE id = 1 FOR UPDATE;
 ROLLBACK;
 DROP TABLE testcase;
+
+-- An UPDATE that must release the buffer lock (because the new tuple needs
+-- toasting or does not fit on the page) first marks the old tuple as locked.
+-- That lock-only Xmax must not keep the update of a rolled-back
+-- subtransaction, even when the updating transaction already holds the
+-- same row lock.
+CREATE TABLE testcase(
+	id int PRIMARY KEY,
+	val text
+);
+INSERT INTO testcase VALUES (1, '');
+BEGIN;
+SELECT id FROM testcase WHERE id = 1 FOR NO KEY UPDATE;
+SAVEPOINT subxact;
+UPDATE testcase SET val = 'subxact' WHERE id = 1;
+ROLLBACK TO SAVEPOINT subxact;
+RELEASE SAVEPOINT subxact;
+UPDATE testcase SET val = repeat('x', 3000) WHERE id = 1;
+SELECT id, length(val) FROM testcase;
+COMMIT;
+-- same with FOR UPDATE and a key update
+BEGIN;
+SELECT id FROM testcase WHERE id = 1 FOR UPDATE;
+SAVEPOINT subxact;
+UPDATE testcase SET val = 'subxact' WHERE id = 1;
+ROLLBACK TO SAVEPOINT subxact;
+RELEASE SAVEPOINT subxact;
+UPDATE testcase SET id = 2, val = repeat('y', 3000) WHERE id = 1;
+SELECT id, length(val) FROM testcase;
+COMMIT;
+-- the new tuple version inherits the Xmax of the old one; a later update of
+-- that version must not trip over the rolled-back update either
+BEGIN;
+SELECT id FROM testcase WHERE id = 2 FOR NO KEY UPDATE;
+SAVEPOINT subxact;
+UPDATE testcase SET val = 'subxact' WHERE id = 2;
+ROLLBACK TO SAVEPOINT subxact;
+RELEASE SAVEPOINT subxact;
+UPDATE testcase SET val = 'small' WHERE id = 2;
+UPDATE testcase SET val = repeat('z', 3000) WHERE id = 2;
+SELECT id, length(val) FROM testcase;
+COMMIT;
+DROP TABLE testcase;
