@@ -33,7 +33,6 @@
 #include "optimizer/planner.h"
 #include "optimizer/prep.h"
 #include "optimizer/subselect.h"
-#include "parser/parse_relation.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -1350,12 +1349,11 @@ convert_ANY_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	Query	   *subselect = (Query *) sublink->subselect;
 	Relids		upper_varnos;
 	int			rtindex;
-	ParseNamespaceItem *nsitem;
 	RangeTblEntry *rte;
+	List	   *colnames;
 	RangeTblRef *rtr;
 	List	   *subquery_vars;
 	Node	   *quals;
-	ParseState *pstate;
 	Relids		sub_ref_outer_relids;
 	bool		use_lateral;
 
@@ -1409,9 +1407,6 @@ convert_ANY_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	if (contain_volatile_functions(sublink->testexpr))
 		return NULL;
 
-	/* Create a dummy ParseState for addRangeTableEntryForSubquery */
-	pstate = make_parsestate(NULL);
-
 	/*
 	 * Okay, pull up the sub-select into upper range table.
 	 *
@@ -1420,12 +1415,19 @@ convert_ANY_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	 * below). Therefore this is a lot easier than what pull_up_subqueries has
 	 * to go through.
 	 */
-	nsitem = addRangeTableEntryForSubquery(pstate,
-										   subselect,
-										   NULL,
-										   use_lateral,
-										   false);
-	rte = nsitem->p_rte;
+	rte = makeNode(RangeTblEntry);
+	rte->rtekind = RTE_SUBQUERY;
+	rte->subquery = subselect;
+	rte->alias = NULL;
+	colnames = NIL;
+	foreach_node(TargetEntry, tle, subselect->targetList)
+	{
+		if (!tle->resjunk)
+			colnames = lappend(colnames, makeString(pstrdup(tle->resname)));
+	}
+	rte->eref = makeAlias("unnamed_subquery", colnames);
+	rte->lateral = use_lateral;
+	rte->inFromCl = false;
 	parse->rtable = lappend(parse->rtable, rte);
 	rtindex = list_length(parse->rtable);
 
