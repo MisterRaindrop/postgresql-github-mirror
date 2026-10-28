@@ -21,6 +21,7 @@
 #include "storage/ipc.h"
 #include "storage/shmem.h"
 #include "utils/builtins.h"
+#include "utils/wait_classes.h"
 
 PG_MODULE_MAGIC;
 
@@ -36,6 +37,7 @@ PG_FUNCTION_INFO_V1(test_slru_page_sync);
 PG_FUNCTION_INFO_V1(test_slru_page_delete);
 PG_FUNCTION_INFO_V1(test_slru_page_truncate);
 PG_FUNCTION_INFO_V1(test_slru_delete_all);
+PG_FUNCTION_INFO_V1(test_slru_tranche_names);
 
 /* Number of SLRU page slots */
 #define NUM_TEST_BUFFERS		16
@@ -196,6 +198,22 @@ test_slru_delete_all(PG_FUNCTION_ARGS)
 	SlruScanDirectory(TestSlruCtl, test_slru_scan_cb, NULL);
 
 	PG_RETURN_VOID();
+}
+
+Datum
+test_slru_tranche_names(PG_FUNCTION_ARGS)
+{
+	int			buffer_tranche = TestSlruCtl->shared->buffer_locks[0].lock.tranche;
+	int			bank_tranche = TestSlruCtl->shared->bank_locks[0].lock.tranche;
+	int			new_tranche;
+
+	/* must not reuse the IDs slru.c assigned at startup */
+	new_tranche = LWLockNewTrancheId("test_slru extra");
+
+	PG_RETURN_TEXT_P(cstring_to_text(psprintf("%s, %s, %s",
+											  GetLWLockIdentifier(PG_WAIT_LWLOCK, buffer_tranche),
+											  GetLWLockIdentifier(PG_WAIT_LWLOCK, bank_tranche),
+											  GetLWLockIdentifier(PG_WAIT_LWLOCK, new_tranche))));
 }
 
 static bool

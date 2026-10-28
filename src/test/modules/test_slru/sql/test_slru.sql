@@ -1,5 +1,8 @@
 CREATE EXTENSION test_slru;
 
+-- Tranches assigned by slru.c must survive startup
+SELECT test_slru_tranche_names();
+
 SELECT test_slru_page_exists(12345);
 SELECT test_slru_page_write(12345, 'Test SLRU');
 SELECT test_slru_page_read(12345);
