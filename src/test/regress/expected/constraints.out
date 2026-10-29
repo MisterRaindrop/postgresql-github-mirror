@@ -1832,3 +1832,169 @@ COMMENT ON CONSTRAINT inv_ck ON DOMAIN constraint_comments_dom IS 'comment on in
 CREATE TABLE regress_notnull1 (a integer);
 CREATE TABLE regress_notnull2 () INHERITS (regress_notnull1);
 ALTER TABLE ONLY regress_notnull2 ALTER COLUMN a SET NOT NULL;
+-- Not-null constraints in inheritance trees: validity must be consistent.
+-- A validated constraint must not sit above a NOT VALID one, because the
+-- descendant may contain nulls.  nnv_state() summarizes column "a" of the
+-- nnv_* tables: V or N (valid or NOT VALID constraint), coninhcount, L if
+-- conislocal, I if connoinherit, and "+" if attnotnull; "-" is no constraint.
+\pset format unaligned
+\pset tuples_only on
+\set VERBOSITY terse
+SET client_min_messages = warning;
+CREATE FUNCTION nnv_state() RETURNS text LANGUAGE sql AS
+$$ SELECT string_agg(substr(c.relname, 5) || '=' ||
+         coalesce(CASE WHEN co.convalidated THEN 'V' ELSE 'N' END ||
+                  co.coninhcount || CASE WHEN co.conislocal THEN 'L' ELSE '' END ||
+                  CASE WHEN co.connoinherit THEN 'I' ELSE '' END, '-') ||
+         CASE WHEN a.attnotnull THEN '+' ELSE '' END, ' ' ORDER BY c.relname)
+   FROM pg_class c
+        JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = 'a'
+        LEFT JOIN pg_constraint co ON co.conrelid = c.oid AND co.contype = 'n'
+                                  AND co.conkey[1] = a.attnum
+   WHERE c.relname ~ '^nnv_' AND c.relkind IN ('r', 'p') $$;
+-- SET NOT NULL must not propagate a valid constraint to a NOT VALID one,
+-- and the failure must undo the other subcommands
+CREATE TABLE nnv_p (a int);
+CREATE TABLE nnv_c (a int) INHERITS (nnv_p);
+INSERT INTO nnv_c VALUES (NULL);
+ALTER TABLE nnv_c ADD CONSTRAINT nn NOT NULL a NOT VALID;
+ALTER TABLE nnv_p ADD COLUMN b int, ALTER COLUMN a SET NOT NULL;	-- error
+ERROR:  incompatible NOT VALID constraint "nn" on relation "nnv_c"
+SELECT nnv_state(), count(*) FROM pg_attribute WHERE attname = 'b'
+  AND attrelid IN ('nnv_p'::regclass, 'nnv_c'::regclass);
+c=N0L+ p=-|0
+DELETE FROM nnv_c;
+ALTER TABLE nnv_c VALIDATE CONSTRAINT nn;
+ALTER TABLE nnv_p ALTER COLUMN a SET NOT NULL;
+ALTER TABLE nnv_p ALTER COLUMN a SET NOT NULL;			-- repeat
+SELECT nnv_state();
+c=V1L+ p=V0L+
+DROP TABLE nnv_p, nnv_c;
+-- same for a partition holding an old null; wrong results must not occur
+CREATE TABLE nnv_p (a int) PARTITION BY LIST (a);
+CREATE TABLE nnv_p1 PARTITION OF nnv_p FOR VALUES IN (1);
+CREATE TABLE nnv_pd PARTITION OF nnv_p DEFAULT;
+INSERT INTO nnv_p VALUES (1);
+INSERT INTO nnv_pd VALUES (NULL);
+ALTER TABLE nnv_pd ADD CONSTRAINT nn NOT NULL a NOT VALID;
+CREATE TABLE nnv_o (x int NOT NULL);
+INSERT INTO nnv_o VALUES (2);
+ALTER TABLE nnv_p ALTER COLUMN a SET NOT NULL;			-- error
+ERROR:  incompatible NOT VALID constraint "nn" on relation "nnv_pd"
+ALTER TABLE ONLY nnv_p ALTER COLUMN a SET NOT NULL;		-- error
+ERROR:  constraint must be added to child tables too
+SELECT nnv_state();
+p=- p1=- pd=N0L+
+SELECT count(*) FROM nnv_p WHERE a IS NULL;
+1
+SELECT count(*) FROM nnv_o WHERE x NOT IN (SELECT a FROM nnv_p);
+0
+DELETE FROM nnv_pd;
+ALTER TABLE nnv_pd VALIDATE CONSTRAINT nn;
+ALTER TABLE nnv_p ALTER COLUMN a SET NOT NULL;
+SELECT nnv_state();
+p=V0L+ p1=V1+ pd=V1L+
+SELECT count(*) FROM nnv_o WHERE x NOT IN (SELECT a FROM nnv_p);
+1
+DROP TABLE nnv_p, nnv_o;
+-- a valid constraint cannot go through a missing intermediate constraint to
+-- a NOT VALID leaf, by SET NOT NULL or by INHERIT
+CREATE TABLE nnv_p (a int);
+CREATE TABLE nnv_m (a int) INHERITS (nnv_p);
+CREATE TABLE nnv_c (a int) INHERITS (nnv_m);
+ALTER TABLE nnv_c ADD CONSTRAINT nn NOT NULL a NOT VALID;
+ALTER TABLE nnv_p ALTER COLUMN a SET NOT NULL;			-- error
+ERROR:  incompatible NOT VALID constraint "nn" on relation "nnv_c"
+ALTER TABLE nnv_p ADD CONSTRAINT nn NOT NULL a NO INHERIT;
+ALTER TABLE nnv_p ALTER CONSTRAINT nn INHERIT;			-- error
+ERROR:  incompatible NOT VALID constraint "nn" on relation "nnv_c"
+SELECT nnv_state();			-- nnv_m still has no constraint
+c=N0L+ m=- p=V0LI+
+DROP TABLE nnv_p, nnv_m, nnv_c;
+-- A NOT VALID parent constraint, made inheritable, gets a NOT VALID one
+-- created for each descendant that lacks it (nnv_m), and accepts existing
+-- NOT VALID (nnv_c) or valid (nnv_c0) ones.  The old nulls in nnv_m and
+-- nnv_c are no problem: nothing is scanned, but the new constraint on nnv_m
+-- is enforced.
+CREATE TABLE nnv_p (a int);
+CREATE TABLE nnv_m (a int) INHERITS (nnv_p);
+CREATE TABLE nnv_c (a int) INHERITS (nnv_m);
+CREATE TABLE nnv_c0 (a int NOT NULL) INHERITS (nnv_m);
+INSERT INTO nnv_m VALUES (NULL);
+INSERT INTO nnv_c VALUES (NULL);
+ALTER TABLE nnv_c ADD CONSTRAINT leaf NOT NULL a NOT VALID;
+ALTER TABLE nnv_p ADD CONSTRAINT root NOT NULL a NO INHERIT NOT VALID;
+ALTER TABLE nnv_p ALTER CONSTRAINT root INHERIT;
+ALTER TABLE nnv_p ALTER CONSTRAINT root INHERIT;		-- repeat
+SELECT nnv_state();
+c=N1L+ c0=V1L+ m=N1+ p=N0L+
+SELECT conenforced FROM pg_constraint
+  WHERE conrelid = 'nnv_m'::regclass AND contype = 'n';
+t
+SELECT count(*) FROM nnv_p WHERE a IS NULL;		-- old nulls remain
+2
+INSERT INTO nnv_m VALUES (NULL);				-- error
+ERROR:  null value in column "a" of relation "nnv_m" violates not-null constraint
+DROP TABLE nnv_p, nnv_m, nnv_c, nnv_c0;
+-- diamond with a further descendant: parent counts, no double counting
+CREATE TABLE nnv_p (a int);
+CREATE TABLE nnv_m1 () INHERITS (nnv_p);
+CREATE TABLE nnv_m2 () INHERITS (nnv_p);
+CREATE TABLE nnv_c () INHERITS (nnv_m1, nnv_m2);
+CREATE TABLE nnv_d () INHERITS (nnv_c);
+ALTER TABLE nnv_p ADD CONSTRAINT root NOT NULL a NO INHERIT NOT VALID;
+ALTER TABLE nnv_p ALTER CONSTRAINT root INHERIT;
+ALTER TABLE nnv_p ALTER CONSTRAINT root INHERIT;		-- repeat
+SELECT nnv_state();
+c=N2+ d=N1+ m1=N1+ m2=N1+ p=N0L+
+DROP TABLE nnv_p, nnv_m1, nnv_m2, nnv_c, nnv_d;
+-- valid parent, NOT VALID bottom of a diamond
+CREATE TABLE nnv_p (a int);
+CREATE TABLE nnv_m1 () INHERITS (nnv_p);
+CREATE TABLE nnv_m2 () INHERITS (nnv_p);
+CREATE TABLE nnv_c () INHERITS (nnv_m1, nnv_m2);
+CREATE TABLE nnv_d () INHERITS (nnv_c);
+ALTER TABLE nnv_d ADD CONSTRAINT nn NOT NULL a NOT VALID;
+ALTER TABLE nnv_p ALTER COLUMN a SET NOT NULL;			-- error
+ERROR:  incompatible NOT VALID constraint "nn" on relation "nnv_d"
+SELECT nnv_state();
+c=- d=N0L+ m1=- m2=- p=-
+ALTER TABLE nnv_d VALIDATE CONSTRAINT nn;
+ALTER TABLE nnv_p ALTER COLUMN a SET NOT NULL;
+SELECT nnv_state();
+c=V2+ d=V1L+ m1=V1+ m2=V1+ p=V0L+
+DROP TABLE nnv_p, nnv_m1, nnv_m2, nnv_c, nnv_d;
+-- ONLY, and a NO INHERIT constraint below
+CREATE TABLE nnv_p (a int);
+CREATE TABLE nnv_c (a int) INHERITS (nnv_p);
+ALTER TABLE nnv_c ADD CONSTRAINT nn NOT NULL a NO INHERIT NOT VALID;
+ALTER TABLE nnv_p ALTER COLUMN a SET NOT NULL;			-- error
+ERROR:  cannot change NO INHERIT status of NOT NULL constraint "nn" on relation "nnv_c"
+ALTER TABLE ONLY nnv_p ALTER COLUMN a SET NOT NULL;		-- ok, NO INHERIT
+SELECT nnv_state();
+c=N0LI+ p=V0LI+
+DROP TABLE nnv_p, nnv_c;
+-- SET NOT NULL on an inherited-only NOT VALID constraint validates it and
+-- makes it local at once; a failure undoes both
+CREATE TABLE nnv_p (a int);
+CREATE TABLE nnv_m (a int) INHERITS (nnv_p);
+CREATE TABLE nnv_c (a int) INHERITS (nnv_m);
+INSERT INTO nnv_c VALUES (NULL);
+ALTER TABLE nnv_p ADD CONSTRAINT nn NOT NULL a NOT VALID;
+ALTER TABLE nnv_m ALTER COLUMN a SET NOT NULL;			-- error
+ERROR:  column "a" of relation "nnv_c" contains null values
+ALTER TABLE ONLY nnv_m ALTER COLUMN a SET NOT NULL;		-- error
+ERROR:  constraint must be validated on child tables too
+SELECT nnv_state();
+c=N1+ m=N1+ p=N0L+
+DELETE FROM nnv_c;
+ALTER TABLE nnv_m ALTER COLUMN a SET NOT NULL;
+ALTER TABLE nnv_m ALTER COLUMN a SET NOT NULL;			-- repeat
+SELECT nnv_state();			-- nnv_m and nnv_c valid, only nnv_m local
+c=V1+ m=V1L+ p=N0L+
+DROP TABLE nnv_p, nnv_m, nnv_c;
+DROP FUNCTION nnv_state();
+RESET client_min_messages;
+\set VERBOSITY default
+\pset tuples_only off
+\pset format aligned

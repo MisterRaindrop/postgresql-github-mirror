@@ -248,7 +248,15 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       (and is not dropped in the same command) which proves no
       <literal>NULL</literal> can exist, then the table scan is skipped.
       If a column has an invalid not-null constraint,
-      <literal>SET NOT NULL</literal> validates it.
+      <literal>SET NOT NULL</literal> validates it.  When the command instead
+      creates a new, valid not-null constraint and propagates it to
+      descendant tables, an existing invalid not-null constraint on that
+      column in a descendant must have been validated beforehand (using
+      <literal>ALTER TABLE ... VALIDATE CONSTRAINT</literal>); otherwise the
+      command fails.  If <literal>ONLY</literal> is specified for a table that
+      has inheritance children, the new constraint is marked
+      <literal>NO INHERIT</literal> and is not propagated; for a partitioned
+      table that has partitions, <literal>ONLY</literal> is rejected.
      </para>
 
      <para>
@@ -607,7 +615,12 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       In addition to changing the inheritability status of the constraint,
       in the case where a non-inheritable constraint is being marked
       inheritable, if the table has children, an equivalent constraint
-      will be added to them. If marking an inheritable constraint as
+      will be added to them.  For a not-null constraint, the added
+      constraints are <literal>NOT VALID</literal> if the constraint being
+      marked inheritable is; if it is valid, the command fails when a child
+      already has an invalid not-null constraint on the column, which must be
+      validated first.
+      If marking an inheritable constraint as
       non-inheritable on a table with children, then the corresponding
       constraint on children will be marked as no longer inherited,
       but not removed.
