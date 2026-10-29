@@ -6304,7 +6304,7 @@ xact_redo_commit(xl_xact_parsed_commit *parsed,
 		/* see equivalent call for relations above */
 		XLogFlush(lsn);
 
-		pgstat_execute_transactional_drops(parsed->nstats, parsed->stats, true);
+		pgstat_execute_transactional_drops(parsed->nstats, parsed->stats);
 	}
 
 	/*
@@ -6415,7 +6415,7 @@ xact_redo_abort(xl_xact_parsed_abort *parsed, TransactionId xid,
 		/* see equivalent call for relations above */
 		XLogFlush(lsn);
 
-		pgstat_execute_transactional_drops(parsed->nstats, parsed->stats, true);
+		pgstat_execute_transactional_drops(parsed->nstats, parsed->stats);
 	}
 }
 
