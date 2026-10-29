@@ -755,8 +755,9 @@ MultiXactIdCreateFromMembers(int nmembers, MultiXactMember *members)
 		}
 	}
 
-	/* Load the injection point before entering the critical section */
+	/* Load the injection points before entering the critical section */
 	INJECTION_POINT_LOAD("multixact-create-from-members");
+	INJECTION_POINT_LOAD("multixact-create-after-wal");
 
 	/*
 	 * Assign the MXID and offsets range to use, and make sure there is space
@@ -800,6 +801,8 @@ MultiXactIdCreateFromMembers(int nmembers, MultiXactMember *members)
 	XLogRegisterData(members, nmembers * sizeof(MultiXactMember));
 
 	(void) XLogInsert(RM_MULTIXACT_ID, XLOG_MULTIXACT_CREATE_ID);
+
+	INJECTION_POINT_CACHED("multixact-create-after-wal", NULL);
 
 	/* Now enter the information into the OFFSETs and MEMBERs logs */
 	RecordNewMultiXact(multi, offset, nmembers, members);
