@@ -180,7 +180,7 @@ static List *pending_shmem_requests;	/* List of ShmemRequests */
  * right order.
  *
  * Postmaster:
- *   INITIAL -> REQUESTING -> INITIALIZING -> DONE
+ *   INITIAL -> REQUESTING -> SIZED -> INITIALIZING -> DONE
  *
  * Backends in EXEC_BACKEND mode:
  *   INITIAL -> REQUESTING -> ATTACHING -> DONE
@@ -199,6 +199,13 @@ enum shmem_request_state
 	 * state.
 	 */
 	SRS_REQUESTING,
+
+	/*
+	 * The required size of the shared memory segment has been calculated. No
+	 * further requests shall be registered before creating the shared memory
+	 * segment.
+	 */
+	SRS_SIZED,
 
 	/*
 	 * Postmaster has finished all shmem requests, and is now initializing the
@@ -405,6 +412,8 @@ ShmemGetRequestedSize(void)
 {
 	size_t		size;
 
+	Assert(shmem_request_state == SRS_REQUESTING);
+
 	/* memory needed for the ShmemIndex */
 	size = hash_estimate_size(list_length(pending_shmem_requests) + SHMEM_INDEX_ADDITIONAL_SIZE,
 							  sizeof(ShmemIndexEnt));
@@ -422,6 +431,8 @@ ShmemGetRequestedSize(void)
 
 		size = add_size(size, request->options->size);
 	}
+
+	shmem_request_state = SRS_SIZED;
 
 	return size;
 }
@@ -695,7 +706,7 @@ InitShmemAllocator(PGShmemHeader *seghdr)
 	}
 	else
 	{
-		Assert(shmem_request_state == SRS_REQUESTING);
+		Assert(shmem_request_state == SRS_SIZED);
 		shmem_request_state = SRS_INITIALIZING;
 	}
 
