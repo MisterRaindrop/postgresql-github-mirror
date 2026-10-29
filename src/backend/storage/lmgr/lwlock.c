@@ -197,6 +197,9 @@ static LWLockTrancheShmemData *LWLockTranches;
 /* backend-local copy of LWLockTranches->num_user_defined */
 static int	LocalNumUserDefinedTranches;
 
+/* is LWLockTranches initialized in this shmem segment?  Postmaster only */
+static bool LWLockTranchesInitialized = false;
+
 /*
  * NamedLWLockTrancheRequests is a list of tranches requested with
  * RequestNamedLWLockTranche().  It is only valid in the postmaster; after
@@ -215,6 +218,7 @@ static int	num_main_array_locks;
 
 static void LWLockShmemRequest(void *arg);
 static void LWLockShmemInit(void *arg);
+static void InitLWLockTranches(void);
 
 const ShmemCallbacks LWLockCallbacks = {
 	.request_fn = LWLockShmemRequest,
@@ -422,6 +426,8 @@ LWLockShmemRequest(void *arg)
 					   .size = sizeof(LWLockTrancheShmemData),
 					   .ptr = (void **) &LWLockTranches,
 		);
+	if (!IsUnderPostmaster)
+		LWLockTranchesInitialized = false;
 
 	/* Space for the LWLock array */
 	if (!IsUnderPostmaster)
@@ -447,9 +453,7 @@ LWLockShmemInit(void *arg)
 	int			pos;
 
 	/* Initialize the dynamic-allocation counter for tranches */
-	LWLockTranches->num_user_defined = 0;
-
-	SpinLockInit(&LWLockTranches->lock);
+	InitLWLockTranches();
 
 	/*
 	 * Allocate and initialize all LWLocks in the main array.  It includes all
@@ -497,6 +501,25 @@ LWLockShmemInit(void *arg)
 
 	/* Cross-check that we agree on the total size with LWLockShmemRequest() */
 	Assert(pos == num_main_array_locks);
+}
+
+/*
+ * shmem_slru_init() can allocate tranches before LWLockShmemInit() runs, so
+ * whichever comes first initializes the registry.
+ */
+static void
+InitLWLockTranches(void)
+{
+	Assert(!IsUnderPostmaster);
+
+	if (LWLockTranchesInitialized)
+		return;
+
+	LWLockTranches->num_user_defined = 0;
+	SpinLockInit(&LWLockTranches->lock);
+	LocalNumUserDefinedTranches = 0;
+
+	LWLockTranchesInitialized = true;
 }
 
 /*
@@ -574,6 +597,9 @@ LWLockNewTrancheId(const char *name)
 				 errmsg("tranche name too long"),
 				 errdetail("LWLock tranche names must be no longer than %d bytes.",
 						   NAMEDATALEN - 1)));
+
+	if (!IsUnderPostmaster)
+		InitLWLockTranches();
 
 	/* The counter and the tranche names are protected by the spinlock */
 	SpinLockAcquire(&LWLockTranches->lock);
