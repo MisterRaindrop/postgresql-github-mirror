@@ -1153,6 +1153,7 @@ EndPrepare(GlobalTransaction gxact)
 	TwoPhaseFileHeader *hdr;
 	StateFileChunk *record;
 	bool		replorigin;
+	XLogRecPtr	prepare_end_lsn;
 
 	/* Add the end sentinel to the list of 2PC records */
 	RegisterTwoPhaseRecord(TWOPHASE_RM_END_ID, 0,
@@ -1212,7 +1213,8 @@ EndPrepare(GlobalTransaction gxact)
 
 	XLogSetRecordFlags(XLOG_INCLUDE_ORIGIN);
 
-	gxact->prepare_end_lsn = XLogInsert(RM_XACT_ID, XLOG_XACT_PREPARE);
+	prepare_end_lsn = XLogInsert(RM_XACT_ID, XLOG_XACT_PREPARE);
+	gxact->prepare_end_lsn = prepare_end_lsn;
 
 	if (replorigin)
 	{
@@ -1258,13 +1260,15 @@ EndPrepare(GlobalTransaction gxact)
 
 	END_CRIT_SECTION();
 
+	INJECTION_POINT("twophase-prepare-before-syncrep", NULL);
+
 	/*
 	 * Wait for synchronous replication, if required.
 	 *
 	 * Note that at this stage we have marked the prepare, but still show as
 	 * running in the procarray (twice!) and continue to hold locks.
 	 */
-	SyncRepWaitForLSN(gxact->prepare_end_lsn, false);
+	SyncRepWaitForLSN(prepare_end_lsn, false);
 
 	records.tail = records.head = NULL;
 	records.num_chunks = 0;
@@ -1536,7 +1540,9 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 	 * in WAL files if the LSN is after the last checkpoint record, or moved
 	 * to disk if for some reason they have lived for a long time.
 	 */
-	if (gxact->ondisk)
+	ondisk = gxact->ondisk;
+	INJECTION_POINT("twophase-finish-after-ondisk-read", NULL);
+	if (ondisk)
 		buf = ReadTwoPhaseFile(fxid, false);
 	else
 		XlogReadTwoPhaseData(gxact->prepare_start_lsn, &buf, NULL);
@@ -1872,8 +1878,7 @@ CheckPointTwoPhase(XLogRecPtr redo_horizon)
 			XlogReadTwoPhaseData(gxact->prepare_start_lsn, &buf, &len);
 			RecreateTwoPhaseFile(gxact->fxid, buf, len);
 			gxact->ondisk = true;
-			gxact->prepare_start_lsn = InvalidXLogRecPtr;
-			gxact->prepare_end_lsn = InvalidXLogRecPtr;
+			INJECTION_POINT("twophase-checkpoint-after-ondisk-set", NULL);
 			pfree(buf);
 			serialized_xacts++;
 		}
@@ -2724,6 +2729,7 @@ LookupGXact(const char *gid, XLogRecPtr prepare_end_lsn,
 				buf = ReadTwoPhaseFile(gxact->fxid, false);
 			else
 			{
+				INJECTION_POINT("twophase-lookup-after-ondisk-read", NULL);
 				Assert(gxact->prepare_start_lsn);
 				XlogReadTwoPhaseData(gxact->prepare_start_lsn, &buf, NULL);
 			}
