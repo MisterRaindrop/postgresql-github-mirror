@@ -39,7 +39,8 @@ tests += {
     },
     'tests': [
       't/001_multixact.pl',
-      't/002_multixact_wraparound.pl'
+      't/002_multixact_wraparound.pl',
+      't/003_multixact_checkpoint.pl'
     ],
   },
 }
