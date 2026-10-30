@@ -1216,6 +1216,13 @@ AlterPublicationOptions(ParseState *pstate, AlterPublicationStmt *stmt,
 
 /*
  * Invalidate the relations.
+ *
+ * A relation that no longer exists is ignored.  The callers build the list
+ * without holding a lock that prevents its relations from being dropped, so
+ * one of them can be dropped concurrently after the list was built.  That
+ * includes ALTER PUBLICATION ... ADD TABLE of a partitioned table: it locks
+ * the table, but not its partitions, and dropping a partition that is not a
+ * direct child of the table takes no lock on the table.
  */
 void
 InvalidatePublicationRels(List *relids)
@@ -1226,10 +1233,18 @@ InvalidatePublicationRels(List *relids)
 	 */
 	if (list_length(relids) < MAX_RELCACHE_INVAL_MSGS)
 	{
-		ListCell   *lc;
+		foreach_oid(relid, relids)
+		{
+			HeapTuple	tup;
 
-		foreach(lc, relids)
-			CacheInvalidateRelcacheByRelid(lfirst_oid(lc));
+			tup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+			/* dropped concurrently */
+			if (!HeapTupleIsValid(tup))
+				continue;
+
+			CacheInvalidateRelcacheByTuple(tup);
+			ReleaseSysCache(tup);
+		}
 	}
 	else
 		CacheInvalidateRelcacheAll();
