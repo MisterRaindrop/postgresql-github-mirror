@@ -332,6 +332,25 @@ if (   $ENV{enable_injection_points} eq 'yes'
 	# Test the race condition at end of the recovery between the startup and logical
 	# decoding status change. This test requires injection points enabled.
 
+	# Wait for a local injection point to be detached during backend exit.
+	# BackgroundPsql::quit() waits for psql to exit, but not for the server
+	# backend to finish its before_shmem_exit callbacks.
+	sub wait_for_injection_point_detached
+	{
+		my ($node, $injection_point_name) = @_;
+
+		$node->poll_query_until(
+			'postgres',
+			qq[
+SELECT NOT EXISTS (
+	SELECT
+	FROM injection_points_list()
+	WHERE point_name = '$injection_point_name'
+)])
+		or die
+		"timed out waiting for injection point '$injection_point_name' to be detached";
+	}
+
 	# Initialize standby4 and start it.
 	my $standby4 = PostgreSQL::Test::Cluster->new('standby4');
 	$standby4->init_from_backup($primary, 'my_backup', has_streaming => 1);
@@ -414,6 +433,7 @@ select pg_create_logical_replication_slot('slot_1', 'test_decoding');
 
 	# Let the released backend finish creating its slot.
 	$psql_create_slot->quit;
+	wait_for_injection_point_detached($primary, 'logical-decoding-activation');
 
 	# Decode from slot_2, whose start point precedes where a redundant
 	# status-change record would have been written; this fails in xlog_decode()
@@ -468,6 +488,7 @@ select pg_cancel_backend(pid) from pg_stat_activity where query ~ 'slot_canceled
 	pass("the activation process aborted");
 
 	$psql_create_slot->quit;
+	wait_for_injection_point_detached($primary, 'logical-decoding-activation');
 
 	# Test concurrent activation processes run and one is interrupted.
 	$psql_create_slot =
