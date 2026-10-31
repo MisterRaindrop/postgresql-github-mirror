@@ -897,6 +897,80 @@ $result = $node_subscriber2->safe_psql('postgres',
 	"SELECT a, b, c FROM tab5_1 ORDER BY 1");
 is($result, qq(4||1), 'updates of tab5 replicated correctly');
 
+# Independent published tables can target ancestors of the same local leaf.
+# Each remote relation has its own column order and replica identity map.
+$node_publisher->safe_psql(
+	'postgres', q{
+	CREATE TABLE tab6 (a int PRIMARY KEY, b int);
+	CREATE TABLE tab6_1 (b int, a int PRIMARY KEY);
+});
+$node_subscriber2->safe_psql(
+	'postgres', q{
+	CREATE TABLE tab6 (a int PRIMARY KEY, b int) PARTITION BY RANGE (a);
+	CREATE TABLE tab6_1 (b int, a int PRIMARY KEY) PARTITION BY RANGE (a);
+	ALTER TABLE tab6 ATTACH PARTITION tab6_1 DEFAULT;
+	CREATE TABLE tab6_leaf PARTITION OF tab6_1 DEFAULT;
+});
+$node_subscriber2->safe_psql('postgres',
+	"ALTER SUBSCRIPTION sub2 REFRESH PUBLICATION WITH (copy_data = false)");
+$node_subscriber2->wait_for_subscription_sync;
+
+foreach my $binary ('false', 'true')
+{
+	$node_subscriber2->safe_psql('postgres',
+		"ALTER SUBSCRIPTION sub2 SET (binary = $binary)");
+	$node_publisher->safe_psql(
+		'postgres', q{
+		INSERT INTO tab6 (a, b) VALUES (1, 11);
+		INSERT INTO tab6_1 (a, b) VALUES (2, 22);
+	});
+	$node_publisher->wait_for_catchup('sub2');
+
+	# Receive both RELATION messages before warming the leaf's mapping.
+	$node_publisher->safe_psql('postgres',
+		"UPDATE tab6 SET b = 111 WHERE a = 1");
+	$node_publisher->wait_for_catchup('sub2');
+	is( $node_subscriber2->safe_psql(
+			'postgres', "SELECT a, b FROM tab6 ORDER BY a"),
+		qq(1|111
+2|22),
+		"first remote relation maps to shared leaf (binary = $binary)");
+
+	$node_publisher->safe_psql('postgres',
+		"UPDATE tab6_1 SET b = 222 WHERE a = 2");
+	$node_publisher->wait_for_catchup('sub2');
+	is( $node_subscriber2->safe_psql(
+			'postgres', "SELECT a, b FROM tab6 ORDER BY a"),
+		qq(1|111
+2|222),
+		"second remote relation maps to shared leaf (binary = $binary)");
+
+	$node_publisher->safe_psql(
+		'postgres', q{
+		BEGIN;
+		UPDATE tab6 SET b = 112 WHERE a = 1;
+		UPDATE tab6_1 SET b = 223 WHERE a = 2;
+		UPDATE tab6 SET b = 113 WHERE a = 1;
+		COMMIT;
+	});
+	$node_publisher->wait_for_catchup('sub2');
+	is( $node_subscriber2->safe_psql(
+			'postgres', "SELECT a, b FROM tab6 ORDER BY a"),
+		qq(1|113
+2|223),
+		"switch remote mappings within a transaction (binary = $binary)");
+
+	$node_publisher->safe_psql('postgres',
+		"DELETE FROM tab6_1; DELETE FROM tab6");
+	$node_publisher->wait_for_catchup('sub2');
+	is( $node_subscriber2->safe_psql('postgres', "SELECT count(*) FROM tab6"),
+		'0',
+		"delete through both remote mappings (binary = $binary)");
+
+	# Keep the next case independent if an earlier assertion failed.
+	$node_subscriber2->safe_psql('postgres', "TRUNCATE tab6");
+}
+
 # Validate we didn't neglect to cleanup any resources on either subscriber.
 foreach my $node ($node_subscriber1, $node_subscriber2)
 {
