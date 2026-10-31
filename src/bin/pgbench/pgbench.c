@@ -4950,7 +4950,10 @@ initCreateTables(PGconn *con)
 
 		/* Construct new create table statement. */
 		printfPQExpBuffer(&query, "create%s table %s(%s)",
-						  (unlogged_tables && partition_method == PART_NONE) ? " unlogged" : "",
+						  (unlogged_tables &&
+						   (partition_method == PART_NONE ||
+							(strcmp(ddl->table, "pgbench_accounts") != 0 &&
+							 strcmp(ddl->table, "pgbench_branches") != 0))) ? " unlogged" : "",
 						  ddl->table,
 						  (scale >= SCALE_32BIT_THRESHOLD) ? ddl->bigcols : ddl->smcols);
 
