@@ -659,6 +659,17 @@ logicalrep_partition_open(LogicalRepRelMapEntry *root,
 	entry = &part_entry->relmapentry;
 
 	/*
+	 * A leaf can be reached through different replication target ancestors.
+	 * Its cached mapping belongs to the remote relation it was built for.
+	 */
+	if (found && entry->remoterel.remoteid &&
+		entry->remoterel.remoteid != remoterel->remoteid)
+	{
+		logicalrep_relmap_free_entry(entry);
+		memset(entry, 0, sizeof(LogicalRepRelMapEntry));
+	}
+
+	/*
 	 * We must always overwrite entry->localrel with the latest partition
 	 * Relation pointer, because the Relation pointed to by the old value may
 	 * have been cleared after the caller would have closed the partition
