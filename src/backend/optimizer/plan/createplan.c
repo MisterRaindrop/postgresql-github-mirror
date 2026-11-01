@@ -1471,6 +1471,19 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 	List	   *subplans = NIL;
 	ListCell   *subpaths;
 	RelOptInfo *rel = best_path->path.parent;
+	bool		consider_async;
+
+	/*
+	 * If appropriate, consider async execution of the children.  Unlike a
+	 * plain Append (which returns tuples in arrival order and hence disables
+	 * async whenever the output must be ordered), a MergeAppend always has
+	 * pathkeys but still preserves ordering by merging the per-child streams.
+	 * A child is only eligible if it is directly async-capable, i.e. we don't
+	 * have to insert a Sort node on top of it below; that is checked per child.
+	 */
+	consider_async = (enable_async_merge_append &&
+					  !best_path->path.parallel_safe &&
+					  list_length(best_path->subpaths) > 1);
 
 	/*
 	 * We don't have the actual creation of the MergeAppend node split out
@@ -1584,6 +1597,18 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 			}
 
 			subplan = sort_plan;
+		}
+		else if (consider_async)
+		{
+			/*
+			 * The subplan is sufficiently ordered on its own, so no Sort node
+			 * was inserted on top of it.  Only in this case is the child still
+			 * directly async-capable, so check for that here.  (If a Sort node
+			 * had been inserted, it would be the MergeAppend's child, and Sort
+			 * nodes are not async-capable.)
+			 */
+			if (mark_async_capable_plan(subplan, subpath))
+				Assert(subplan->async_capable);
 		}
 
 		subplans = lappend(subplans, subplan);
