@@ -1778,3 +1778,23 @@ WHERE COALESCE(t1.id, -1) NOT IN
     (SELECT t1.val FROM not_null_tab t2 WHERE t2.val IS NOT NULL);
 
 ROLLBACK;
+
+--
+-- Numbered subplan names must not collide with names used as given, such as
+-- CTE names, whichever comes first
+--
+EXPLAIN (COSTS OFF)
+WITH expr_1 AS MATERIALIZED (SELECT 1 AS x)
+SELECT (SELECT x FROM expr_1), (SELECT 2 WHERE random() >= 0);
+
+-- expr_1 is generated first, so the CTE expr_1 that comes after is numbered
+EXPLAIN (COSTS OFF)
+SELECT (SELECT 1 WHERE random() >= 0),
+       (WITH expr_1 AS MATERIALIZED (SELECT 2 AS x) SELECT x FROM expr_1);
+
+-- expr_5 is used as given after expr_1 .. expr_4, so the next one is expr_6
+EXPLAIN (COSTS OFF)
+SELECT (SELECT 1 WHERE random() >= 0), (SELECT 2 WHERE random() >= 0),
+       (SELECT 3 WHERE random() >= 0),
+       (WITH expr_5 AS MATERIALIZED (SELECT 4 AS x) SELECT x FROM expr_5),
+       (SELECT 5 WHERE random() >= 0);
