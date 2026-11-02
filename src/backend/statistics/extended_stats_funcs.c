@@ -946,7 +946,7 @@ check_all_expr_argnames_valid(JsonbContainer *cont, AttrNumber exprnum)
 		Assert(jkey.type == jbvString);
 
 		/* A value must follow the key */
-		jitok = JsonbIteratorNext(&jbit, &jval, false);
+		jitok = JsonbIteratorNext(&jbit, &jval, true);
 		Assert(jitok == WJB_VALUE);
 
 		/*
