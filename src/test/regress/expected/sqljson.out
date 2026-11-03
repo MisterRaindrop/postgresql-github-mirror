@@ -1462,6 +1462,38 @@ LINE 1: create index on test_range_immutable(json_object('key' value...
                                              ^
 drop table test_range_immutable;
 drop type range_int;
+-- Arrays of a user-defined base type, or of a domain over one, are mutable:
+-- their elements are converted through a cast to json, looked up at run time
+create type mytext_t;
+create function mytext_t_in(cstring) returns mytext_t
+  language internal immutable strict as 'textin';
+NOTICE:  return type mytext_t is only a shell
+create function mytext_t_out(mytext_t) returns cstring
+  language internal immutable strict as 'textout';
+NOTICE:  argument type mytext_t is only a shell
+LINE 1: create function mytext_t_out(mytext_t) returns cstring
+                                     ^
+create type mytext_t (input = mytext_t_in, output = mytext_t_out, like = text);
+create domain d_mytext_t as mytext_t;
+create table test_base_array(a mytext_t[], b d_mytext_t[]);
+create index on test_base_array(json_array(a returning jsonb)); -- error
+ERROR:  functions in index expression must be marked IMMUTABLE
+LINE 1: create index on test_base_array(json_array(a returning jsonb...
+                                        ^
+create index on test_base_array(json_array(b returning jsonb)); -- error
+ERROR:  functions in index expression must be marked IMMUTABLE
+LINE 1: create index on test_base_array(json_array(b returning jsonb...
+                                        ^
+create index on test_base_array(json_object('key' value a returning jsonb)); -- error
+ERROR:  functions in index expression must be marked IMMUTABLE
+LINE 1: create index on test_base_array(json_object('key' value a re...
+                                        ^
+drop table test_base_array;
+drop domain d_mytext_t;
+drop type mytext_t cascade;
+NOTICE:  drop cascades to 2 other objects
+DETAIL:  drop cascades to function mytext_t_in(cstring)
+drop cascades to function mytext_t_out(mytext_t)
 -- IS JSON predicate
 SELECT NULL IS JSON;
  ?column? 

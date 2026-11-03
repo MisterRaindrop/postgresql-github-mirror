@@ -6134,8 +6134,17 @@ json_check_mutability(Oid typoid, bool *has_mutable)
 
 		if (OidIsValid(att_typelem))
 		{
-			/* recurse into array element type */
-			json_check_mutability(att_typelem, has_mutable);
+			/*
+			 * Elements of a user-defined base type are printed through a cast
+			 * to json if one exists, looked up at run time, so creating or
+			 * dropping that cast later changes the output.  Treat such arrays
+			 * as mutable, like user-defined ranges; otherwise recurse into the
+			 * element type.
+			 */
+			if (getBaseType(att_typelem) >= FirstNormalObjectId)
+				*has_mutable = true;
+			else
+				json_check_mutability(att_typelem, has_mutable);
 			return;
 		}
 	}

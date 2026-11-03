@@ -562,6 +562,23 @@ create index on test_range_immutable(json_object('key' value m returning jsonb))
 drop table test_range_immutable;
 drop type range_int;
 
+-- Arrays of a user-defined base type, or of a domain over one, are mutable:
+-- their elements are converted through a cast to json, looked up at run time
+create type mytext_t;
+create function mytext_t_in(cstring) returns mytext_t
+  language internal immutable strict as 'textin';
+create function mytext_t_out(mytext_t) returns cstring
+  language internal immutable strict as 'textout';
+create type mytext_t (input = mytext_t_in, output = mytext_t_out, like = text);
+create domain d_mytext_t as mytext_t;
+create table test_base_array(a mytext_t[], b d_mytext_t[]);
+create index on test_base_array(json_array(a returning jsonb)); -- error
+create index on test_base_array(json_array(b returning jsonb)); -- error
+create index on test_base_array(json_object('key' value a returning jsonb)); -- error
+drop table test_base_array;
+drop domain d_mytext_t;
+drop type mytext_t cascade;
+
 -- IS JSON predicate
 SELECT NULL IS JSON;
 SELECT NULL IS NOT JSON;
