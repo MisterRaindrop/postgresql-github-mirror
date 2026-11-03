@@ -2674,7 +2674,7 @@ PGTYPEStimestamp_defmt_scan(char **str, char *fmt, timestamp * d,
 				 * find the end of the substitution
 				 */
 				pfmt++;
-				tmp = pgtypes_alloc(strlen("%m/%d/%y") + strlen(pstr) + 1);
+				tmp = pgtypes_alloc(strlen("%m/%d/%y") + strlen(pfmt) + 1);
 				if (!tmp)
 					return 1;
 				strcpy(tmp, "%m/%d/%y");
@@ -2801,7 +2801,7 @@ PGTYPEStimestamp_defmt_scan(char **str, char *fmt, timestamp * d,
 				break;
 			case 'r':
 				pfmt++;
-				tmp = pgtypes_alloc(strlen("%I:%M:%S %p") + strlen(pstr) + 1);
+				tmp = pgtypes_alloc(strlen("%I:%M:%S %p") + strlen(pfmt) + 1);
 				if (!tmp)
 					return 1;
 				strcpy(tmp, "%I:%M:%S %p");
@@ -2811,7 +2811,7 @@ PGTYPEStimestamp_defmt_scan(char **str, char *fmt, timestamp * d,
 				return err;
 			case 'R':
 				pfmt++;
-				tmp = pgtypes_alloc(strlen("%H:%M") + strlen(pstr) + 1);
+				tmp = pgtypes_alloc(strlen("%H:%M") + strlen(pfmt) + 1);
 				if (!tmp)
 					return 1;
 				strcpy(tmp, "%H:%M");
@@ -2859,7 +2859,7 @@ PGTYPEStimestamp_defmt_scan(char **str, char *fmt, timestamp * d,
 				break;
 			case 'T':
 				pfmt++;
-				tmp = pgtypes_alloc(strlen("%H:%M:%S") + strlen(pstr) + 1);
+				tmp = pgtypes_alloc(strlen("%H:%M:%S") + strlen(pfmt) + 1);
 				if (!tmp)
 					return 1;
 				strcpy(tmp, "%H:%M:%S");
