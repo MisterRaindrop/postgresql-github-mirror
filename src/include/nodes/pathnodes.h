@@ -186,6 +186,12 @@ typedef struct PlannerGlobal
 	/* names already used for subplans (list of C strings) */
 	List	   *subplanNames pg_node_attr(read_write_ignore);
 
+	/* the subset of subplanNames used without a numeric suffix */
+	List	   *givenSubplanNames pg_node_attr(read_write_ignore);
+
+	/* last numeric suffix for each base name; see choose_plan_name() */
+	List	   *subplanNameSuffixes pg_node_attr(read_write_ignore);
+
 	/* indices of subplans that require REWIND */
 	Bitmapset  *rewindPlanIDs;
 

@@ -9195,68 +9195,88 @@ create_partial_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 }
 
 /*
+ * The last numeric suffix given to subplan names built on one base name; see
+ * choose_plan_name().
+ */
+typedef struct SubplanNameSuffix
+{
+	const char *base;			/* the base name */
+	uint32		last_suffix;	/* the last suffix given to it */
+} SubplanNameSuffix;
+
+/*
+ * Is "name" in "names", a list of C strings?
+ */
+static bool
+plan_name_is_in(List *names, const char *name)
+{
+	foreach_ptr(char, n, names)
+	{
+		if (strcmp(n, name) == 0)
+			return true;
+	}
+	return false;
+}
+
+/*
  * Choose a unique name for some subroot.
  *
- * Modifies glob->subplanNames to track names already used.
+ * If always_number is false and the name is not taken yet, it is used as
+ * given.  Otherwise we append "_N", where N is the next value of a counter
+ * kept for each base name.  So no two generated names are equal: N's digits
+ * contain no "_", so a generated name determines its base name and N (they
+ * are what comes before and after its last "_"), and no base name gets the
+ * same N twice.  A generated name can still equal a name used as given, such
+ * as a CTE called "expr_5", and either of the two can come first.  So a name
+ * to be used as given is checked against all the names taken so far, and a
+ * generated one against the names used as given, moving on to the next N if
+ * it is taken.
+ *
+ * Names are never released, so every N up to the counter is taken, and this
+ * gives the smallest N that is free.  A name used as given makes us skip at
+ * most one N, so a counter never exceeds the number of names assigned and
+ * cannot wrap around.  The names depend only on the order of the calls, so
+ * planning the same query again gives the same names.
  */
 char *
 choose_plan_name(PlannerGlobal *glob, const char *name, bool always_number)
 {
-	unsigned	n;
+	SubplanNameSuffix *suffix = NULL;
+	char	   *chosen_name;
 
-	/*
-	 * If a numeric suffix is not required, then search the list of
-	 * previously-assigned names for a match. If none is found, then we can
-	 * use the provided name without modification.
-	 */
-	if (!always_number)
+	if (!always_number && !plan_name_is_in(glob->subplanNames, name))
 	{
-		bool		found = false;
-
-		foreach_ptr(char, subplan_name, glob->subplanNames)
-		{
-			if (strcmp(subplan_name, name) == 0)
-			{
-				found = true;
-				break;
-			}
-		}
-
-		if (!found)
-		{
-			/* pstrdup here is just to avoid cast-away-const */
-			char	   *chosen_name = pstrdup(name);
-
-			glob->subplanNames = lappend(glob->subplanNames, chosen_name);
-			return chosen_name;
-		}
+		/* pstrdup here is just to avoid cast-away-const */
+		chosen_name = pstrdup(name);
+		glob->givenSubplanNames = lappend(glob->givenSubplanNames,
+										  chosen_name);
+		glob->subplanNames = lappend(glob->subplanNames, chosen_name);
+		return chosen_name;
 	}
 
-	/*
-	 * If a numeric suffix is required or if the un-suffixed name is already
-	 * in use, then loop until we find a positive integer that produces a
-	 * novel name.
-	 */
-	for (n = 1; true; ++n)
+	foreach_ptr(SubplanNameSuffix, s, glob->subplanNameSuffixes)
 	{
-		char	   *proposed_name = psprintf("%s_%u", name, n);
-		bool		found = false;
-
-		foreach_ptr(char, subplan_name, glob->subplanNames)
+		if (strcmp(s->base, name) == 0)
 		{
-			if (strcmp(subplan_name, proposed_name) == 0)
-			{
-				found = true;
-				break;
-			}
+			suffix = s;
+			break;
 		}
-
-		if (!found)
-		{
-			glob->subplanNames = lappend(glob->subplanNames, proposed_name);
-			return proposed_name;
-		}
-
-		pfree(proposed_name);
 	}
+	if (suffix == NULL)
+	{
+		suffix = palloc0_object(SubplanNameSuffix);
+		suffix->base = pstrdup(name);
+		glob->subplanNameSuffixes = lappend(glob->subplanNameSuffixes, suffix);
+	}
+
+	for (;;)
+	{
+		chosen_name = psprintf("%s_%u", name, ++suffix->last_suffix);
+		if (!plan_name_is_in(glob->givenSubplanNames, chosen_name))
+			break;
+		pfree(chosen_name);
+	}
+
+	glob->subplanNames = lappend(glob->subplanNames, chosen_name);
+	return chosen_name;
 }
