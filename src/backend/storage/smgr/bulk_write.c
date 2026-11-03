@@ -41,6 +41,7 @@
 #include "storage/bufpage.h"
 #include "storage/bulk_write.h"
 #include "storage/smgr.h"
+#include "utils/injection_point.h"
 #include "utils/rel.h"
 
 #define MAX_PENDING_WRITES XLR_MAX_BLOCK_ID
@@ -203,6 +204,7 @@ smgr_bulk_finish(BulkWriteState *bulkstate)
 		 * DELAY_CHKPT_START, which would stay set if smgrregistersync()
 		 * failed inside a subtransaction.
 		 */
+		INJECTION_POINT("bulk-write-before-registersync", NULL);
 		smgrregistersync(bulkstate->smgr, bulkstate->forknum);
 
 		if (bulkstate->start_RedoRecPtr != GetRedoRecPtr())
