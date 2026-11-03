@@ -40,7 +40,6 @@
 #include "access/xlogrecord.h"
 #include "storage/bufpage.h"
 #include "storage/bulk_write.h"
-#include "storage/proc.h"
 #include "storage/smgr.h"
 #include "utils/rel.h"
 
@@ -197,26 +196,24 @@ smgr_bulk_finish(BulkWriteState *bulkstate)
 		 */
 
 		/*
-		 * Prevent a checkpoint from starting between the GetRedoRecPtr() and
-		 * smgrregistersync() calls.
+		 * Register the sync request before checking the redo pointer.  If the
+		 * redo pointer has not moved, any checkpoint that sets a new redo
+		 * pointer after the check will absorb the request before it syncs. In
+		 * this order there is no need to hold off checkpoints with
+		 * DELAY_CHKPT_START, which would stay set if smgrregistersync()
+		 * failed inside a subtransaction.
 		 */
-		Assert((MyProc->delayChkptFlags & DELAY_CHKPT_START) == 0);
-		MyProc->delayChkptFlags |= DELAY_CHKPT_START;
+		smgrregistersync(bulkstate->smgr, bulkstate->forknum);
 
 		if (bulkstate->start_RedoRecPtr != GetRedoRecPtr())
 		{
 			/*
 			 * A checkpoint occurred and it didn't know about our writes, so
-			 * fsync() the relation ourselves.
+			 * fsync() the relation ourselves.  The sync request registered
+			 * above is then redundant, but harmless.
 			 */
-			MyProc->delayChkptFlags &= ~DELAY_CHKPT_START;
 			smgrimmedsync(bulkstate->smgr, bulkstate->forknum);
 			elog(DEBUG1, "flushed relation because a checkpoint occurred concurrently");
-		}
-		else
-		{
-			smgrregistersync(bulkstate->smgr, bulkstate->forknum);
-			MyProc->delayChkptFlags &= ~DELAY_CHKPT_START;
 		}
 	}
 }
