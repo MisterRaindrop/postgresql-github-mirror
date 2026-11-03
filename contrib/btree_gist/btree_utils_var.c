@@ -331,16 +331,12 @@ gbt_var_union(const GistEntryVector *entryvec, int32 *size, Oid collation,
 	int			i = 0,
 				numranges = entryvec->n;
 	GBT_VARKEY *cur;
-	Datum		out;
-	GBT_VARKEY_R rk;
+	Datum		out = PointerGetDatum(NULL);
 
 	*size = sizeof(GBT_VARKEY);
 
-	cur = (GBT_VARKEY *) DatumGetPointer(entryvec->vector[0].key);
-	rk = gbt_var_key_readable(cur);
-	out = PointerGetDatum(gbt_var_key_copy(&rk));
-
-	for (i = 1; i < numranges; i++)
+	/* Entries may be leaf keys; gbt_var_bin_union converts those. */
+	for (i = 0; i < numranges; i++)
 	{
 		cur = (GBT_VARKEY *) DatumGetPointer(entryvec->vector[i].key);
 		gbt_var_bin_union(&out, cur, collation, tinfo, flinfo);
