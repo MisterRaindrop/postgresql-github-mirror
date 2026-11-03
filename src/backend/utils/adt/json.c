@@ -697,7 +697,7 @@ to_json_is_immutable(Oid typoid)
 {
 	bool		has_mutable = false;
 
-	json_check_mutability(typoid, false, &has_mutable);
+	json_check_mutability(typoid, &has_mutable);
 	return !has_mutable;
 }
 

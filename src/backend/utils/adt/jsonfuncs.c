@@ -506,6 +506,7 @@ static JsonParseErrorType transform_string_values_object_field_start(void *state
 static JsonParseErrorType transform_string_values_array_element_start(void *state, bool isnull);
 static JsonParseErrorType transform_string_values_scalar(void *state, char *token, JsonTokenType tokentype);
 
+static Oid	get_json_cast_for_type(Oid typoid);
 
 /*
  * pg_parse_json_or_errsave
@@ -6067,18 +6068,17 @@ json_categorize_type(Oid typoid, bool is_jsonb,
 
 /*
  * Check whether a type conversion to JSON or JSONB involves any mutable
- * functions.  This recurses into container types (arrays, composites,
- * ranges, multiranges, domains) to check their element/sub types.
+ * functions.  This recurses into container types (arrays, ranges, multiranges,
+ * domains, etc) to check their element/sub types.  Composite types are always
+ * considered mutable.
  *
  * The caller must initialize *has_mutable to false before calling.
  * If any mutable function is found, *has_mutable is set to true.
  */
 void
-json_check_mutability(Oid typoid, bool is_jsonb, bool *has_mutable)
+json_check_mutability(Oid typoid, bool *has_mutable)
 {
 	char		att_typtype = get_typtype(typoid);
-	JsonTypeCategory tcategory;
-	Oid			outfuncoid;
 
 	/* since this function recurses, it could be driven to stack overflow */
 	check_stack_depth();
@@ -6090,41 +6090,42 @@ json_check_mutability(Oid typoid, bool is_jsonb, bool *has_mutable)
 
 	if (att_typtype == TYPTYPE_DOMAIN)
 	{
-		json_check_mutability(getBaseType(typoid), is_jsonb, has_mutable);
+		json_check_mutability(getBaseType(typoid), has_mutable);
+		return;
+	}
+	else if (att_typtype == TYPTYPE_ENUM)
+	{
+		/*
+		 * ALTER TYPE ... RENAME VALUE can change an enum's output without
+		 * rebuilding indexes, so an enum is never immutable.
+		 */
+		*has_mutable = true;
 		return;
 	}
 	else if (att_typtype == TYPTYPE_COMPOSITE)
 	{
 		/*
-		 * For a composite type, recurse into its attributes.  Use the
-		 * typcache to avoid opening the relation directly.
+		 * The output includes the attribute names, which ALTER TYPE can
+		 * change, so a composite is never immutable.
 		 */
-		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typoid, -1);
-
-		for (int i = 0; i < tupdesc->natts; i++)
-		{
-			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
-
-			if (attr->attisdropped)
-				continue;
-
-			json_check_mutability(attr->atttypid, is_jsonb, has_mutable);
-			if (*has_mutable)
-				break;
-		}
-		ReleaseTupleDesc(tupdesc);
+		*has_mutable = true;
 		return;
 	}
-	else if (att_typtype == TYPTYPE_RANGE)
+	else if (att_typtype == TYPTYPE_RANGE ||
+			 att_typtype == TYPTYPE_MULTIRANGE)
 	{
-		json_check_mutability(get_range_subtype(typoid), is_jsonb,
-							  has_mutable);
-		return;
-	}
-	else if (att_typtype == TYPTYPE_MULTIRANGE)
-	{
-		json_check_mutability(get_multirange_range(typoid), is_jsonb,
-							  has_mutable);
+		/*
+		 * A cast to json on a user-defined range or multirange can be created
+		 * or dropped after this check, changing the output without
+		 * invalidating anything that depends on it, so treat such types as
+		 * mutable.
+		 */
+		if (typoid >= FirstNormalObjectId)
+			*has_mutable = true;
+		else if (att_typtype == TYPTYPE_RANGE)
+			json_check_mutability(get_range_subtype(typoid), has_mutable);
+		else
+			json_check_mutability(get_multirange_range(typoid), has_mutable);
 		return;
 	}
 	else
@@ -6133,37 +6134,86 @@ json_check_mutability(Oid typoid, bool is_jsonb, bool *has_mutable)
 
 		if (OidIsValid(att_typelem))
 		{
-			/* recurse into array element type */
-			json_check_mutability(att_typelem, is_jsonb, has_mutable);
+			/*
+			 * Elements of a user-defined base type are printed through a cast
+			 * to json if one exists, looked up at run time, so creating or
+			 * dropping that cast later changes the output.  Treat such arrays
+			 * as mutable, like user-defined ranges; otherwise recurse into the
+			 * element type.
+			 */
+			if (getBaseType(att_typelem) >= FirstNormalObjectId)
+				*has_mutable = true;
+			else
+				json_check_mutability(att_typelem, has_mutable);
 			return;
 		}
 	}
 
-	json_categorize_type(typoid, is_jsonb, &tcategory, &outfuncoid);
-
-	switch (tcategory)
+	switch (typoid)
 	{
-		case JSONTYPE_NULL:
-		case JSONTYPE_BOOL:
-		case JSONTYPE_NUMERIC:
+		case BOOLOID:
+		case INT2OID:
+		case INT4OID:
+		case INT8OID:
+		case NUMERICOID:
+		case JSONOID:
+		case JSONBOID:
+			/* known immutable */
 			break;
 
-		case JSONTYPE_DATE:
-		case JSONTYPE_TIMESTAMP:
-		case JSONTYPE_TIMESTAMPTZ:
+		case DATEOID:
+		case TIMESTAMPOID:
+		case TIMESTAMPTZOID:
 			*has_mutable = true;
 			break;
 
-		case JSONTYPE_JSON:
-		case JSONTYPE_JSONB:
-		case JSONTYPE_ARRAY:
-		case JSONTYPE_COMPOSITE:
+		case RECORDOID:
+		case ANYARRAYOID:
+		case ANYCOMPATIBLEARRAYOID:
+
+			/*
+			 * The field or element types of these pseudo-types are not known
+			 * until runtime, so assume the worst.
+			 */
+			*has_mutable = true;
 			break;
 
-		case JSONTYPE_CAST:
-		case JSONTYPE_OTHER:
-			if (func_volatile(outfuncoid) != PROVOLATILE_IMMUTABLE)
-				*has_mutable = true;
+		default:
+			{
+				Oid			funcoid = get_json_cast_for_type(typoid);
+
+				if (!OidIsValid(funcoid))
+				{
+					bool		typisvarlena;
+
+					getTypeOutputInfo(typoid, &funcoid, &typisvarlena);
+				}
+				if (func_volatile(funcoid) != PROVOLATILE_IMMUTABLE)
+					*has_mutable = true;
+			}
 			break;
 	}
+}
+
+/*
+ * Return the OID of the cast function from typoid to JSON, or InvalidOid if
+ * there is no such cast.  As a matter of policy, we only consider explicit,
+ * user-defined casts.  This must match the lookup in json_categorize_type():
+ * it is used for both json and jsonb output, a cast to jsonb is never used.
+ */
+static Oid
+get_json_cast_for_type(Oid typoid)
+{
+	if (typoid >= FirstNormalObjectId)
+	{
+		Oid			castfunc;
+		CoercionPathType ctype;
+
+		ctype = find_coercion_pathway(JSONOID, typoid,
+									  COERCION_EXPLICIT,
+									  &castfunc);
+		if (ctype == COERCION_PATH_FUNC && OidIsValid(castfunc))
+			return castfunc;
+	}
+	return InvalidOid;
 }

@@ -1082,7 +1082,7 @@ to_jsonb_is_immutable(Oid typoid)
 {
 	bool		has_mutable = false;
 
-	json_check_mutability(typoid, true, &has_mutable);
+	json_check_mutability(typoid, &has_mutable);
 	return !has_mutable;
 }
 

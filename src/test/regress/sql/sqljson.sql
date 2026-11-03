@@ -457,13 +457,20 @@ create domain d_comp1 as comp1;
 create domain mydomain as timestamptz;
 create type mydomainrange as range(subtype=mydomain);
 create type comp3 as (a int, b mydomainrange);
+create type comp4 as (a int, b int);
+create type myr AS range (subtype = int);
+create function myr_json(myr) returns json volatile
+  language sql AS $$ SELECT json_build_array(random()) $$;
+create cast (myr AS json) with function myr_json(myr);
 create table test_mutability(
 	a text[], b timestamp, c timestamptz,
 	d date, f1 comp1[], f2 timestamp[],
 	f3 d_comp1[],
 	f4 mydomainrange[],
 	f5 comp3,
-	f6 mydomainmultirange);
+	f6 mydomainmultirange,
+	f7 comp4,
+	f8 myr);
 
 -- JSON_OBJECTAGG, JSON_ARRAYAGG are aggregate functions, cannot be used in index
 create index xx on test_mutability(json_objectagg(a: b absent on null with unique keys returning jsonb));
@@ -482,6 +489,12 @@ create index on test_mutability(json_array(f3 returning jsonb)); -- error
 create index on test_mutability(json_array(f4 returning jsonb)); -- error
 create index on test_mutability(json_array(f5 returning jsonb)); -- error
 create index on test_mutability(json_array(f6 returning jsonb)); -- error
+create index on test_mutability(json_array(array[f6] returning jsonb)); -- error
+create index on test_mutability(json_array(row(f6) returning jsonb)); -- error
+create index on test_mutability(json_array(array[row(c)] returning jsonb)); -- error
+create index on test_mutability(json_array(row(1) returning jsonb)); -- error
+create index on test_mutability(json_array(f7 returning jsonb)); -- error
+create index on test_mutability(json_array(f8 returning jsonb)); -- error
 
 -- jsonb: create expression index via json_object
 create index on test_mutability(json_object('hello' value a returning jsonb)); -- ok
@@ -508,6 +521,9 @@ alter table test_mutability add column f11 json generated always as (json_array(
 alter table test_mutability add column f11 json generated always as (json_array(f4 returning json)); -- error
 alter table test_mutability add column f11 json generated always as (json_array(f5 returning json)); -- error
 alter table test_mutability add column f11 json generated always as (json_array(f6 returning json)); -- error
+alter table test_mutability add column f11 json generated always as (json_array(array[row(f6)] returning json)); -- error
+alter table test_mutability add column f11 json generated always as (json_array(array[row(f7)] returning json)); -- error
+alter table test_mutability add column f11 json generated always as (json_array(array[row(f8)] returning json)); -- error
 
 -- data type json doesn't have a default operator class for access method "btree" so
 -- we use a generated column to test whether the JSON_OBJECT expression is
@@ -522,6 +538,8 @@ alter table test_mutability add column f12 json generated always as (json_object
 alter table test_mutability add column f12 json generated always as (json_object('hello' value f4 returning json)); -- error
 alter table test_mutability add column f12 json generated always as (json_object('hello' value f5 returning json)); -- error
 alter table test_mutability add column f12 json generated always as (json_object('hello' value f6 returning json)); -- error
+alter table test_mutability add column f12 json generated always as (json_object('hello' value f7 returning json)); -- error
+alter table test_mutability add column f12 json generated always as (json_object('hello' value row(f2) returning json)); -- error
 
 drop table test_mutability;
 drop domain d_comp1;
@@ -529,16 +547,37 @@ drop type comp3;
 drop type mydomainrange;
 drop domain mydomain;
 drop type comp1;
+drop type comp4;
+drop cast (myr AS json);
+drop function myr_json;
+drop type myr;
 
--- Range/multirange with immutable subtype should be considered immutable
+-- User-defined range/multirange always considered as mutable
 create type range_int as range(subtype=int);
 create table test_range_immutable(r range_int, m multirange_int);
-create index on test_range_immutable(json_array(r returning jsonb)); -- ok
-create index on test_range_immutable(json_array(m returning jsonb)); -- ok
-create index on test_range_immutable(json_object('key' value r returning jsonb)); -- ok
-create index on test_range_immutable(json_object('key' value m returning jsonb)); -- ok
+create index on test_range_immutable(json_array(r returning jsonb)); -- error
+create index on test_range_immutable(json_array(m returning jsonb)); -- error
+create index on test_range_immutable(json_object('key' value r returning jsonb)); -- error
+create index on test_range_immutable(json_object('key' value m returning jsonb)); -- error
 drop table test_range_immutable;
 drop type range_int;
+
+-- Arrays of a user-defined base type, or of a domain over one, are mutable:
+-- their elements are converted through a cast to json, looked up at run time
+create type mytext_t;
+create function mytext_t_in(cstring) returns mytext_t
+  language internal immutable strict as 'textin';
+create function mytext_t_out(mytext_t) returns cstring
+  language internal immutable strict as 'textout';
+create type mytext_t (input = mytext_t_in, output = mytext_t_out, like = text);
+create domain d_mytext_t as mytext_t;
+create table test_base_array(a mytext_t[], b d_mytext_t[]);
+create index on test_base_array(json_array(a returning jsonb)); -- error
+create index on test_base_array(json_array(b returning jsonb)); -- error
+create index on test_base_array(json_object('key' value a returning jsonb)); -- error
+drop table test_base_array;
+drop domain d_mytext_t;
+drop type mytext_t cascade;
 
 -- IS JSON predicate
 SELECT NULL IS JSON;
