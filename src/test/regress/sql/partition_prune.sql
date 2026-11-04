@@ -1558,3 +1558,40 @@ select * from (select a, b from phv_boolpart) t
   group by grouping sets (a, b);
 
 drop table phv_boolpart;
+
+--
+-- Partition key expressions and partition constraints must be
+-- const-simplified the same way as quals, so that NullTests on NOT NULL
+-- columns are reduced on both sides
+--
+create table pp_notnull (a int not null, b int) partition by list (coalesce(a, b));
+create table pp_notnull1 partition of pp_notnull for values in (1);
+create table pp_notnull2 partition of pp_notnull for values in (2);
+insert into pp_notnull values (1, null), (2, null);
+explain (costs off) select * from pp_notnull where coalesce(a, b) = 1;
+-- run-time pruning
+prepare pp_notnull_q (int) as select * from pp_notnull where coalesce(a, b) = $1;
+set plan_cache_mode = force_generic_plan;
+explain (costs off) execute pp_notnull_q (1);
+execute pp_notnull_q (1);
+reset plan_cache_mode;
+deallocate pp_notnull_q;
+drop table pp_notnull;
+
+create table pp_notnull (a int not null, b int)
+  partition by list ((case when a is null then b else a end));
+create table pp_notnull1 partition of pp_notnull for values in (1);
+create table pp_notnull2 partition of pp_notnull for values in (2);
+explain (costs off) select * from pp_notnull
+  where (case when a is null then b else a end) = 1;
+drop table pp_notnull;
+
+-- the qual contradicts pp_notnull1's partition constraint
+create table pp_notnull (a int not null, b int) partition by range (coalesce(a, 0));
+create table pp_notnull1 partition of pp_notnull for values from (0) to (10)
+  partition by range (b);
+create table pp_notnull1_1 partition of pp_notnull1 for values from (0) to (100);
+create table pp_notnull1_def partition of pp_notnull1 default;
+create table pp_notnull2 partition of pp_notnull for values from (10) to (20);
+explain (costs off) select * from pp_notnull1 where coalesce(a, 0) = 15;
+drop table pp_notnull;

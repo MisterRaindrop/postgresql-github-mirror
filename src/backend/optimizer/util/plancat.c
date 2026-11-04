@@ -81,9 +81,11 @@ static void set_relation_partition_info(PlannerInfo *root, RelOptInfo *rel,
 										Relation relation);
 static PartitionScheme find_partition_scheme(PlannerInfo *root,
 											 Relation relation);
-static void set_baserel_partition_key_exprs(Relation relation,
+static void set_baserel_partition_key_exprs(PlannerInfo *root,
+											Relation relation,
 											RelOptInfo *rel);
-static void set_baserel_partition_constraint(Relation relation,
+static void set_baserel_partition_constraint(PlannerInfo *root,
+											 Relation relation,
 											 RelOptInfo *rel);
 
 
@@ -1626,7 +1628,7 @@ get_relation_constraints(PlannerInfo *root,
 	if (include_partition && relation->rd_rel->relispartition)
 	{
 		/* make sure rel->partition_qual is set */
-		set_baserel_partition_constraint(relation, rel);
+		set_baserel_partition_constraint(root, relation, rel);
 		result = list_concat(result, rel->partition_qual);
 	}
 
@@ -2703,8 +2705,8 @@ set_relation_partition_info(PlannerInfo *root, RelOptInfo *rel,
 	Assert(partdesc != NULL && rel->part_scheme != NULL);
 	rel->boundinfo = partdesc->boundinfo;
 	rel->nparts = partdesc->nparts;
-	set_baserel_partition_key_exprs(relation, rel);
-	set_baserel_partition_constraint(relation, rel);
+	set_baserel_partition_key_exprs(root, relation, rel);
+	set_baserel_partition_constraint(root, relation, rel);
 }
 
 /*
@@ -2819,7 +2821,7 @@ find_partition_scheme(PlannerInfo *root, Relation relation)
  * rel->partexprs.
  */
 static void
-set_baserel_partition_key_exprs(Relation relation,
+set_baserel_partition_key_exprs(PlannerInfo *root, Relation relation,
 								RelOptInfo *rel)
 {
 	PartitionKey partkey = RelationGetPartitionKey(relation);
@@ -2861,6 +2863,14 @@ set_baserel_partition_key_exprs(Relation relation,
 			/* Re-stamp the expression with given varno. */
 			partexpr = (Expr *) copyObject(lfirst(lc));
 			ChangeVarNodes((Node *) partexpr, 1, varno, 0);
+
+			/*
+			 * The relcache const-simplified the expression without a valid
+			 * "root".  Run it through const-simplification again now that the
+			 * varnos are fixed, so that NullTest quals for Vars are reduced
+			 * the same way as in qual clauses we match it against.
+			 */
+			partexpr = (Expr *) eval_const_expressions(root, (Node *) partexpr);
 			lc = lnext(partkey->partexprs, lc);
 		}
 
@@ -2887,7 +2897,8 @@ set_baserel_partition_key_exprs(Relation relation,
  * given relation.
  */
 static void
-set_baserel_partition_constraint(Relation relation, RelOptInfo *rel)
+set_baserel_partition_constraint(PlannerInfo *root, Relation relation,
+								 RelOptInfo *rel)
 {
 	List	   *partconstr;
 
@@ -2900,13 +2911,17 @@ set_baserel_partition_constraint(Relation relation, RelOptInfo *rel)
 	 * quals should be in canonical form already; also, since the qual is in
 	 * implicit-AND format, we'd have to explicitly convert it to explicit-AND
 	 * format and back again.
+	 *
+	 * Fix the varnos first and use a valid "root", because
+	 * eval_const_expressions reduces NullTest quals for Vars based on varno.
 	 */
 	partconstr = RelationGetPartitionQual(relation);
 	if (partconstr)
 	{
-		partconstr = (List *) expression_planner((Expr *) partconstr);
 		if (rel->relid != 1)
 			ChangeVarNodes((Node *) partconstr, 1, rel->relid, 0);
+		partconstr = (List *) eval_const_expressions(root, (Node *) partconstr);
+		fix_opfuncids((Node *) partconstr);
 		rel->partition_qual = partconstr;
 	}
 }
