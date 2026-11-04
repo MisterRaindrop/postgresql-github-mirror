@@ -703,14 +703,14 @@ fmgr_security_definer(PG_FUNCTION_ARGS)
 
 	/* GetUserIdAndSecContext is cheap enough that no harm in a wasted call */
 	GetUserIdAndSecContext(&save_userid, &save_sec_context);
+	if (OidIsValid(fcache->userid))
+		SetUserIdAndSecContext(fcache->userid,
+							   save_sec_context | SECURITY_LOCAL_USERID_CHANGE);
+
 	if (fcache->configNames != NIL) /* Need a new GUC nesting level */
 		save_nestlevel = NewGUCNestLevel();
 	else
 		save_nestlevel = 0;		/* keep compiler quiet */
-
-	if (OidIsValid(fcache->userid))
-		SetUserIdAndSecContext(fcache->userid,
-							   save_sec_context | SECURITY_LOCAL_USERID_CHANGE);
 
 	forthree(lc1, fcache->configNames,
 			 lc2, fcache->configHandles,
@@ -768,12 +768,12 @@ fmgr_security_definer(PG_FUNCTION_ARGS)
 
 	fcinfo->flinfo = save_flinfo;
 
+	if (fmgr_hook)
+		(*fmgr_hook) (FHET_END, &fcache->flinfo, &fcache->arg);
 	if (fcache->configNames != NIL)
 		AtEOXact_GUC(true, save_nestlevel);
 	if (OidIsValid(fcache->userid))
 		SetUserIdAndSecContext(save_userid, save_sec_context);
-	if (fmgr_hook)
-		(*fmgr_hook) (FHET_END, &fcache->flinfo, &fcache->arg);
 
 	return result;
 }
