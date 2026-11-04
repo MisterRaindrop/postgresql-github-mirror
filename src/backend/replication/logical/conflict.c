@@ -16,6 +16,7 @@
 
 #include "access/commit_ts.h"
 #include "access/genam.h"
+#include "access/htup_details.h"
 #include "access/tableam.h"
 #include "catalog/heap.h"
 #include "catalog/pg_am.h"
@@ -236,24 +237,32 @@ bool
 GetTupleTransactionInfo(TupleTableSlot *localslot, TransactionId *xmin,
 						ReplOriginId *localorigin, TimestampTz *localts)
 {
-	Datum		xminDatum;
-	bool		isnull;
+	HeapTuple	tuple;
+	TransactionId tup_xmin;
 
-	xminDatum = slot_getsysattr(localslot, MinTransactionIdAttributeNumber,
-								&isnull);
-	*xmin = DatumGetTransactionId(xminDatum);
-	Assert(!isnull);
+	*xmin = InvalidTransactionId;
+	*localorigin = InvalidReplOriginId;
+	*localts = 0;
+
+	Assert(TTS_IS_BUFFERTUPLE(localslot));
+	tuple = ExecFetchSlotHeapTuple(localslot, false, NULL);
+
+	/*
+	 * Do not return transaction information for frozen tuples, as their
+	 * original XID is no longer meaningful.
+	 */
+	tup_xmin = HeapTupleHeaderGetXmin(tuple->t_data);
+	if (!TransactionIdIsNormal(tup_xmin))
+		return false;
+
+	*xmin = tup_xmin;
 
 	/*
 	 * The commit timestamp data is not available if track_commit_timestamp is
 	 * disabled.
 	 */
 	if (!track_commit_timestamp)
-	{
-		*localorigin = InvalidReplOriginId;
-		*localts = 0;
 		return false;
-	}
 
 	return TransactionIdGetCommitTsData(*xmin, localts, localorigin);
 }
@@ -499,7 +508,7 @@ errdetail_apply_conflict(EState *estate, ResultRelInfo *relinfo,
 										 localxmin, timestamptz_to_str(localts));
 				}
 			}
-			else
+			else if (TransactionIdIsValid(localxmin))
 			{
 				if (tuple_buf.len)
 					appendStringInfo(&err_detail, _("Key already exists in unique index \"%s\", modified in transaction %u: %s."),
@@ -508,6 +517,15 @@ errdetail_apply_conflict(EState *estate, ResultRelInfo *relinfo,
 				else
 					appendStringInfo(&err_detail, _("Key already exists in unique index \"%s\", modified in transaction %u."),
 									 get_rel_name(indexoid), localxmin);
+			}
+			else
+			{
+				if (tuple_buf.len)
+					appendStringInfo(&err_detail, _("Key already exists in unique index \"%s\": %s."),
+									 get_rel_name(indexoid), tuple_buf.data);
+				else
+					appendStringInfo(&err_detail, _("Key already exists in unique index \"%s\"."),
+									 get_rel_name(indexoid));
 			}
 
 			break;

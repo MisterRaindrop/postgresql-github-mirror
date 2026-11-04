@@ -209,6 +209,53 @@ ok( $node_B->poll_query_until(
 	),
 	"the xmin value of slot 'pg_conflict_detection' is valid on Node B");
 
+###############################################################################
+# Check that frozen tuples do not use their raw xmin for conflict detection or
+# reporting. Run this before enabling retain_dead_tuples on Node A so that
+# VACUUM FREEZE is not held back by the conflict detection slot.
+###############################################################################
+
+$node_A->safe_psql(
+	'postgres', "
+	CREATE UNIQUE INDEX tab_b_key ON tab (b);
+	INSERT INTO tab VALUES (3, 1), (4, 2), (5, 3);");
+$node_A->wait_for_catchup($subname_BA);
+$node_A->safe_psql('postgres', "VACUUM FREEZE tab;");
+
+my $log_location = -s $node_A->logfile;
+
+$node_B->safe_psql(
+	'postgres', "
+	UPDATE tab SET b = 10 WHERE a = 3;
+	DELETE FROM tab WHERE a = 3;
+	DELETE FROM tab WHERE a = 4;");
+$node_B->wait_for_catchup($subname_AB);
+
+my $logfile = slurp_file($node_A->logfile(), $log_location);
+unlike(
+	$logfile,
+	qr/conflict detected on relation "public.tab": conflict=(update|delete)_origin_differs/,
+	'frozen tuples do not trigger update_origin_differs or delete_origin_differs'
+);
+
+$log_location = -s $node_A->logfile;
+
+$node_B->safe_psql('postgres', "INSERT INTO tab VALUES (6, 3);");
+
+$node_A->wait_for_log(
+	qr/conflict detected on relation "public.tab": conflict=insert_exists.*
+.*Could not apply remote change: remote row \(6, 3\).*
+.*Key already exists in unique index "tab_b_key": key \(b\)=\(3\), local row \(5, 3\)./,
+	$log_location);
+
+pass('insert_exists on frozen tuple does not report transaction details');
+
+# Clean up
+$node_A->safe_psql('postgres', "DROP INDEX tab_b_key;");
+$node_B->wait_for_catchup($subname_AB);
+$node_A->safe_psql('postgres', "TRUNCATE tab;");
+$node_A->wait_for_catchup($subname_BA);
+
 ##################################################
 # Check that the retain_dead_tuples option can be enabled only for disabled
 # subscriptions. Validate the NOTICE message during the subscription DDL, and
@@ -292,7 +339,7 @@ $node_A->poll_query_until('postgres',
 	"SELECT count(*) = 0 FROM pg_stat_activity WHERE backend_type = 'logical replication apply worker'"
 );
 
-my $log_location = -s $node_B->logfile;
+$log_location = -s $node_B->logfile;
 
 $node_B->safe_psql('postgres', "UPDATE tab SET b = 3 WHERE a = 1;");
 $node_A->safe_psql('postgres', "DELETE FROM tab WHERE a = 1;");
@@ -309,7 +356,7 @@ like(
 $node_A->wait_for_catchup($subname_BA);
 
 # Check the conflict detected on Node B
-my $logfile = slurp_file($node_B->logfile(), $log_location);
+$logfile = slurp_file($node_B->logfile(), $log_location);
 like(
 	$logfile,
 	qr/conflict detected on relation "public.tab": conflict=delete_origin_differs.*
