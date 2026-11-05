@@ -46,6 +46,7 @@ step s1idx			{ CREATE TABLE d3_listp3 PARTITION OF d3_listp FOR VALUES IN (3);
 step s1attach2		{ ALTER INDEX d3_idx ATTACH PARTITION d3_listp2_a; }
 step s1attach3		{ CREATE UNIQUE INDEX d3_listp3_a ON d3_listp3 (a);
 					  ALTER INDEX d3_idx ATTACH PARTITION d3_listp3_a; }
+step s1idxall		{ CREATE INDEX d3_idx ON d3_listp (a); }
 step s1valid		{ SELECT indisvalid FROM pg_index WHERE indexrelid = 'd3_idx'::regclass; }
 
 session s2
@@ -96,3 +97,6 @@ permutation s2snitch s1b s1s s2detach s1cancel(s2detach) s1c s2begin s2detachfin
 
 # The index of a partition pending detach must not count toward validity.
 permutation s2snitch s1idx s1b s1s s2detach s1cancel(s2detach) s1c s1attach2 s1valid s1attach3 s1valid
+
+# CREATE INDEX is rejected while a partition has an incomplete detach.
+permutation s2snitch s1b s1s s2detach s1cancel(s2detach) s1c s1idxall
