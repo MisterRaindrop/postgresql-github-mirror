@@ -521,6 +521,7 @@ generic_redo(XLogReaderState *record)
 
 			PageSetLSN(page, lsn);
 			MarkBufferDirty(buffers[block_id]);
+			XLogFlushBufferForRedoIfInit(record, block_id, buffers[block_id]);
 		}
 	}
 

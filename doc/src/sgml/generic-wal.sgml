@@ -139,8 +139,13 @@
     <listitem>
      <para>
       For unlogged relations, everything works the same except that no
-      actual WAL record is emitted.  Thus, you typically do not need to do
-      any explicit checks for unlogged relations.
+      actual WAL record is emitted for pages other than those of the
+      initialization fork (<literal>INIT_FORKNUM</literal>), as written by
+      <link linkend="index-functions"><function>ambuildempty</function></link>.
+      Those are always WAL-logged, since the initialization fork is used to
+      reset the relation after a crash and on a promoted standby.  Thus, you
+      typically do not need to do any explicit checks for unlogged
+      relations.
      </para>
     </listitem>
 
