@@ -191,3 +191,15 @@ select explain_filter('explain (analyze,buffers off,costs off) select sum(n) ove
 -- Test tuplestore storage usage in Window aggregate (memory and disk case, final result is disk)
 select explain_filter('explain (analyze,buffers off,costs off) select sum(n) over(partition by m) from (SELECT n < 3 as m, n from generate_series(1,2500) a(n))');
 reset work_mem;
+
+-- Rows Removed by Filter is averaged over loops, like actual rows,
+-- and must be shown with fractional digits as well
+explain (analyze, costs off, timing off, summary off, buffers off)
+select count(*) from generate_series(0, 9) g join tenk1 b on b.unique1 = g
+where b.ten <> 0;
+-- Join Filter of a join that is itself rescanned
+explain (analyze, costs off, timing off, summary off, buffers off)
+select count(*) from generate_series(0, 9) g,
+  lateral (select 1 from tenk1 b join tenk1 c
+             on c.unique2 = b.unique1 and b.ten <> c.ten
+           where b.unique1 = g offset 0) s;
