@@ -1206,7 +1206,8 @@ copy_table(Relation rel)
 										 NULL, false, false);
 
 	attnamelist = make_copy_attnamelist(relmapentry);
-	cstate = BeginCopyFrom(pstate, rel, NULL, NULL, false, copy_read_data, attnamelist, options);
+	cstate = BeginCopyFromExtended(pstate, rel, NULL, NULL, false,
+								   copy_read_data, attnamelist, options, true);
 
 	/* Do the copy */
 	(void) CopyFrom(cstate);
