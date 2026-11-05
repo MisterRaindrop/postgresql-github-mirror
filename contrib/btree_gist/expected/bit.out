@@ -74,3 +74,29 @@ SELECT a FROM bittmp WHERE a BETWEEN '1000000' and '1000001';
    Index Cond: ((a >= '1000000'::"bit") AND (a <= '1000001'::"bit"))
 (2 rows)
 
+-- Page splits of a multicolumn index union leaf keys; afterwards an index
+-- probe on each row's own value must find that row exactly once
+CREATE TABLE bitmulti (a bit(16), b int);
+CREATE INDEX bitmultiidx ON bitmulti USING gist (a, b);
+INSERT INTO bitmulti SELECT i::bit(16), i FROM generate_series(1, 300) i;
+EXPLAIN (COSTS OFF)
+SELECT t.a FROM bitmulti t,
+  LATERAL (SELECT count(*) AS n FROM bitmulti u WHERE u.a = t.a) p
+WHERE p.n <> 1;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Nested Loop
+   ->  Index Only Scan using bitmultiidx on bitmulti t
+   ->  Aggregate
+         Filter: (count(*) <> 1)
+         ->  Index Only Scan using bitmultiidx on bitmulti u
+               Index Cond: (a = t.a)
+(6 rows)
+
+SELECT t.a FROM bitmulti t,
+  LATERAL (SELECT count(*) AS n FROM bitmulti u WHERE u.a = t.a) p
+WHERE p.n <> 1;
+ a 
+---
+(0 rows)
+
