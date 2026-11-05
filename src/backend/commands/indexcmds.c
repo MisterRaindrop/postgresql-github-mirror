@@ -740,6 +740,8 @@ DefineIndex(ParseState *pstate,
 	partitioned = rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE;
 	if (partitioned)
 	{
+		PartitionDesc pd;
+
 		/*
 		 * Note: we check 'stmt->concurrent' rather than 'concurrent', so that
 		 * the error is thrown also for temporary tables.  Seems better to be
@@ -751,6 +753,27 @@ DefineIndex(ParseState *pstate,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("cannot create index on partitioned table \"%s\" concurrently",
 							RelationGetRelationName(rel))));
+
+		/*
+		 * A partition pending detach is still visible to older snapshots, but
+		 * it cannot be altered, so it would be left without the index.  Ask
+		 * for the detach to be completed first.
+		 */
+		pd = RelationGetPartitionDesc(rel, false);
+		if (pd->detached_exist)
+		{
+			for (int i = 0; i < pd->nparts; i++)
+			{
+				if (PartitionHasPendingDetach(pd->oids[i]))
+					ereport(ERROR,
+							(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							 errmsg("cannot create index on partitioned table \"%s\"",
+									RelationGetRelationName(rel)),
+							 errdetail("Partition \"%s\" has an incomplete detach.",
+									   get_rel_name(pd->oids[i])),
+							 errhint("Use ALTER TABLE ... DETACH PARTITION ... FINALIZE to complete the pending detach operation.")));
+			}
+		}
 	}
 
 	/*
