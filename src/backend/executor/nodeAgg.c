@@ -595,11 +595,11 @@ initialize_aggregate(AggState *aggstate, AggStatePerTrans pertrans,
 
 
 		/*
-		 * We use a plain Datum sorter when there's a single input column;
-		 * otherwise sort the full tuple.  (See comments for
-		 * process_ordered_aggregate_single.)
+		 * We use a plain Datum sorter when there's a single input column and
+		 * a single sort key; otherwise sort the full tuple.  (See comments
+		 * for process_ordered_aggregate_single.)
 		 */
-		if (pertrans->numInputs == 1)
+		if (pertrans->numInputs == 1 && pertrans->numSortCols == 1)
 		{
 			Form_pg_attribute attr = TupleDescAttr(pertrans->sortdesc, 0);
 
@@ -935,7 +935,7 @@ process_ordered_aggregate_single(AggState *aggstate,
 
 /*
  * Run the transition function for a DISTINCT or ORDER BY aggregate
- * with more than one input.  This is called after we have completed
+ * with multiple inputs or sort keys.  This is called after we have completed
  * entering all the input values into the sort object.  We complete the
  * sort, read out the values in sorted order, and run the transition
  * function on each value (applying DISTINCT if appropriate).
@@ -1316,7 +1316,7 @@ finalize_aggregates(AggState *aggstate,
 			Assert(aggstate->aggstrategy != AGG_HASHED &&
 				   aggstate->aggstrategy != AGG_MIXED);
 
-			if (pertrans->numInputs == 1)
+			if (pertrans->numInputs == 1 && pertrans->numSortCols == 1)
 				process_ordered_aggregate_single(aggstate,
 												 pertrans,
 												 pergroupstate);
@@ -4307,7 +4307,9 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 							&pertrans->inputtypeLen,
 							&pertrans->inputtypeByVal);
 		}
-		else if (numDistinctCols > 0)
+
+		/* Even a single input can have several DISTINCT columns */
+		if (numDistinctCols > 1)
 		{
 			/* we will need an extra slot to store prior values */
 			pertrans->uniqslot =
