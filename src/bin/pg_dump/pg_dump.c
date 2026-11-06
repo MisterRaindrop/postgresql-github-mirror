@@ -2274,7 +2274,9 @@ selectDumpableExtension(ExtensionInfo *extinfo, DumpOptions *dopt)
  *
  * A publication can have schemas and tables which have schemas, but those are
  * ignored in decision making, because publications are only dumped when we are
- * dumping everything.
+ * dumping everything, but excluding tables or schemas does not change that.
+ * References to excluded objects are kept on purpose, so that they can be
+ * restored separately, before the rest of the dump.
  */
 static void
 selectDumpablePublicationObject(DumpableObject *dobj, Archive *fout)

@@ -1667,6 +1667,13 @@ CREATE DATABASE foo WITH TEMPLATE template0;
   </para>
 
   <para>
+   When tables are excluded with <option>-N</option>, <option>-T</option>
+   or <option>--exclude-table-and-children</option>, publications that
+   depend on them are still dumped in full, and restoring those
+   publications fails if the excluded tables do not exist.
+  </para>
+
+  <para>
    When a dump without schema is chosen and the option <option>--disable-triggers</option>
    is used, <application>pg_dump</application> emits commands
    to disable triggers on user tables before inserting the data,
