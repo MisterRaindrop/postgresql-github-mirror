@@ -8390,7 +8390,7 @@ select * from rem1;
 create table gloc1 (
   a int,
   b int generated always as (a * 2) stored,
-  c int
+  c int generated always as (a * 3) virtual
 );
 alter table gloc1 set (autovacuum_enabled = 'false');
 create foreign table grem1 (
@@ -8423,10 +8423,10 @@ update grem1 set a = 22 where a = 2;
 
 update grem1 set a = 22 where a = 2;
 select * from gloc1;
- a  | b  | c 
-----+----+---
-  1 |  2 |  
- 22 | 44 |  
+ a  | b  | c  
+----+----+----
+  1 |  2 |  3
+ 22 | 44 | 66
 (2 rows)
 
 select * from grem1;
@@ -8442,8 +8442,8 @@ copy grem1 from stdin;
 select * from gloc1;
  a | b | c 
 ---+---+---
- 1 | 2 |  
- 2 | 4 |  
+ 1 | 2 | 3
+ 2 | 4 | 6
 (2 rows)
 
 select * from grem1;
@@ -8471,8 +8471,8 @@ insert into grem1 (a) values (1), (2);
 select * from gloc1;
  a | b | c 
 ---+---+---
- 1 | 2 |  
- 2 | 4 |  
+ 1 | 2 | 3
+ 2 | 4 | 6
 (2 rows)
 
 select * from grem1;
@@ -10819,7 +10819,7 @@ CREATE TABLE import_source.t3 (c1 timestamptz default now(), c2 typ1);
 CREATE TABLE import_source."x 4" (c1 float8, "C 2" text, c3 varchar(42));
 CREATE TABLE import_source."x 5" (c1 float8);
 ALTER TABLE import_source."x 5" DROP COLUMN c1;
-CREATE TABLE import_source."x 6" (c1 int, c2 int generated always as (c1 * 2) stored);
+CREATE TABLE import_source."x 6" (c1 int, c2 int generated always as (c1 * 2) stored, c3 int generated always as (c1 * 3) virtual);
 CREATE TABLE import_source.t4 (c1 int) PARTITION BY RANGE (c1);
 CREATE TABLE import_source.t4_part PARTITION OF import_source.t4
   FOR VALUES FROM (1) TO (100);
@@ -10893,6 +10893,7 @@ FDW options: (schema_name 'import_source', table_name 'x 5')
 --------+---------+-----------+----------+-------------------------------------+--------------------
  c1     | integer |           |          |                                     | (column_name 'c1')
  c2     | integer |           |          | generated always as (c1 * 2) stored | (column_name 'c2')
+ c3     | integer |           |          | generated always as (c1 * 3)        | (column_name 'c3')
 Server: loopback
 FDW options: (schema_name 'import_source', table_name 'x 6')
 
@@ -10966,6 +10967,7 @@ FDW options: (schema_name 'import_source', table_name 'x 5')
 --------+---------+-----------+----------+-------------------------------------+--------------------
  c1     | integer |           |          |                                     | (column_name 'c1')
  c2     | integer |           |          | generated always as (c1 * 2) stored | (column_name 'c2')
+ c3     | integer |           |          | generated always as (c1 * 3)        | (column_name 'c3')
 Server: loopback
 FDW options: (schema_name 'import_source', table_name 'x 6')
 
@@ -11038,6 +11040,7 @@ FDW options: (schema_name 'import_source', table_name 'x 5')
 --------+---------+-----------+----------+---------+--------------------
  c1     | integer |           |          |         | (column_name 'c1')
  c2     | integer |           |          |         | (column_name 'c2')
+ c3     | integer |           |          |         | (column_name 'c3')
 Server: loopback
 FDW options: (schema_name 'import_source', table_name 'x 6')
 
