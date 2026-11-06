@@ -2310,7 +2310,7 @@ select * from rem1;
 create table gloc1 (
   a int,
   b int generated always as (a * 2) stored,
-  c int
+  c int generated always as (a * 3) virtual
 );
 alter table gloc1 set (autovacuum_enabled = 'false');
 create foreign table grem1 (
@@ -3562,7 +3562,7 @@ CREATE TABLE import_source.t3 (c1 timestamptz default now(), c2 typ1);
 CREATE TABLE import_source."x 4" (c1 float8, "C 2" text, c3 varchar(42));
 CREATE TABLE import_source."x 5" (c1 float8);
 ALTER TABLE import_source."x 5" DROP COLUMN c1;
-CREATE TABLE import_source."x 6" (c1 int, c2 int generated always as (c1 * 2) stored);
+CREATE TABLE import_source."x 6" (c1 int, c2 int generated always as (c1 * 2) stored, c3 int generated always as (c1 * 3) virtual);
 CREATE TABLE import_source.t4 (c1 int) PARTITION BY RANGE (c1);
 CREATE TABLE import_source.t4_part PARTITION OF import_source.t4
   FOR VALUES FROM (1) TO (100);

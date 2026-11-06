@@ -6729,12 +6729,17 @@ postgresImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 
 			/* Add GENERATED if needed */
 			if (import_generated && attgenerated != NULL &&
-				attgenerated[0] == ATTRIBUTE_GENERATED_STORED)
+				(attgenerated[0] == ATTRIBUTE_GENERATED_STORED ||
+				 attgenerated[0] == ATTRIBUTE_GENERATED_VIRTUAL))
 			{
 				Assert(attdefault != NULL);
 				appendStringInfo(&buf,
-								 " GENERATED ALWAYS AS (%s) STORED",
+								 " GENERATED ALWAYS AS (%s)",
 								 attdefault);
+				if (attgenerated[0] == ATTRIBUTE_GENERATED_STORED)
+					appendStringInfoString(&buf, " STORED");
+				else
+					appendStringInfoString(&buf, " VIRTUAL");
 			}
 
 			/* Add NOT NULL if needed */
