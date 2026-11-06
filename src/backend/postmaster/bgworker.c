@@ -65,7 +65,10 @@ dlist_head	BackgroundWorkerList = DLIST_STATIC_INIT(BackgroundWorkerList);
  * As an exception, however, even when the slot is in use, regular backends
  * may set the 'terminate' flag for a slot, telling the postmaster not
  * to restart it.  Once the background worker is no longer running, the slot
- * will be released for reuse.
+ * will be released for reuse.  Regular backends may also set the
+ * 'interrupt' flag, telling the postmaster to send SIGTERM to the worker
+ * without unregistering it, so that it is restarted as after any other
+ * exit with a non-zero exit code.
  *
  * In addition to coordinating with the postmaster, backends modifying this
  * data structure must coordinate with each other.  Since they can take locks,
@@ -80,6 +83,7 @@ typedef struct BackgroundWorkerSlot
 {
 	bool		in_use;
 	bool		terminate;
+	bool		interrupt;
 	pid_t		pid;			/* InvalidPid = not started yet; 0 = dead */
 	uint64		generation;		/* incremented when slot is recycled */
 	BackgroundWorker worker;
@@ -219,6 +223,7 @@ BackgroundWorkerShmemInit(void *arg)
 		Assert(slotno < max_worker_processes);
 		slot->in_use = true;
 		slot->terminate = false;
+		slot->interrupt = false;
 		slot->pid = InvalidPid;
 		slot->generation = 0;
 		rw->rw_shmem_slot = slotno;
@@ -325,6 +330,18 @@ BackgroundWorkerStateChange(bool allow_new_workers)
 					/* Report never-started, now-terminated worker as dead. */
 					ReportBackgroundWorkerPID(rw);
 				}
+			}
+
+			/*
+			 * Someone can also set the interrupt flag, asking for the worker
+			 * to be signaled once.  A worker that is not running has nothing
+			 * to be interrupted.
+			 */
+			if (slot->interrupt)
+			{
+				slot->interrupt = false;
+				if (rw->rw_pid != 0)
+					kill(rw->rw_pid, SIGTERM);
 			}
 			continue;
 		}
@@ -1124,6 +1141,7 @@ RegisterDynamicBackgroundWorker(BackgroundWorker *worker,
 			slot->pid = InvalidPid; /* indicates not started yet */
 			slot->generation++;
 			slot->terminate = false;
+			slot->interrupt = false;
 			generation = slot->generation;
 			if (parallel)
 				BackgroundWorkerData->parallel_register_count++;
@@ -1420,6 +1438,9 @@ GetBackgroundWorkerTypeByPid(pid_t pid)
 /*
  * Terminate all background workers connected to the given database, if the
  * workers can be interrupted.
+ *
+ * The postmaster sends SIGTERM to the workers and restarts them depending
+ * on their bgw_restart_time.
  */
 void
 TerminateBackgroundWorkersForDatabase(Oid databaseId)
@@ -1449,7 +1470,7 @@ TerminateBackgroundWorkersForDatabase(Oid databaseId)
 			proc = BackendPidGetProcWithLock(pid);
 			if (proc && proc->databaseId == databaseId)
 			{
-				slot->terminate = true;
+				slot->interrupt = true;
 				signal_postmaster = true;
 
 				elog(DEBUG1, "termination requested for worker (PID %d) on database %u",
